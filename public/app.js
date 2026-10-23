@@ -162,6 +162,7 @@ async function api(path, options = {}) {
     window.location.href = '/login';
     throw new Error('请先登录');
   }
+  if (data.code === 'PASSWORD_CHANGE_REQUIRED') window.location.href = '/change-password';
   if (!response.ok) throw new Error(data.error || `请求失败（${response.status}）`);
   return data;
 }
@@ -1063,7 +1064,7 @@ async function openUsers() {
             <input name="display_name" placeholder="张三" />
           </label>
           <label>初始密码
-            <input name="password" type="password" minlength="6" required />
+            <input name="password" type="password" minlength="12" maxlength="128" required />
           </label>
           <label>角色
             <select name="role">
@@ -1141,7 +1142,7 @@ async function openUsers() {
     }));
 
     $$('[data-user-reset]').forEach((button) => button.addEventListener('click', async () => {
-      const password = prompt('输入新密码（至少 6 位）');
+      const password = prompt('输入新密码（12–128 位）');
       if (!password) return;
       try {
         await api(`/api/users/${button.dataset.userReset}`, {
@@ -1825,10 +1826,10 @@ function openChangePassword() {
           <input type="password" name="old_password" autocomplete="current-password" required />
         </label>
         <label>新密码
-          <input type="password" name="new_password" minlength="6" autocomplete="new-password" required />
+          <input type="password" name="new_password" minlength="12" maxlength="128" autocomplete="new-password" required />
         </label>
         <label>确认新密码
-          <input type="password" name="confirm_password" minlength="6" autocomplete="new-password" required />
+          <input type="password" name="confirm_password" minlength="12" maxlength="128" autocomplete="new-password" required />
         </label>
         <button class="btn primary" type="submit">保存</button>
       </form>
@@ -2084,6 +2085,7 @@ function bindEvents() {
   bindEvents();
   try {
     const { user } = await api('/api/auth/me');
+    if (user.must_change_password) { window.location.href = '/change-password'; return; }
     state.user = user;
     applyUser();
     await loadMembers();

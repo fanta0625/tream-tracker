@@ -8,6 +8,8 @@ chmod 600 data/tracker.db* data/session.secret 2>/dev/null || true
 if [ -f server.pid ] && kill -0 "$(cat server.pid)" 2>/dev/null; then
   echo "team-tracker 已在运行 (PID $(cat server.pid))"
 else
+  # Foreground only: initial credentials must not enter logs/server.log.
+  node initialize.js
   nohup node server.js >> logs/server.log 2>&1 &
   echo $! > server.pid
   echo "team-tracker 已启动 (PID $(cat server.pid))"

@@ -75,7 +75,7 @@ form.addEventListener('submit', async (event) => {
     });
     form.querySelectorAll('input, button').forEach((el) => { el.disabled = true; });
     showSuccess(`${result.message || '密码已重置'}，<a href="/login">去登录</a>`);
-    successBox.innerHTML = `${result.message || '密码已重置'}，<a href="/login">去登录</a>`;
+    showSuccess(result.message || '密码已重置，请返回登录');
   } catch (err) {
     showError(err.message);
     submitButton.disabled = false;

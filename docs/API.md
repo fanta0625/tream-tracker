@@ -2,7 +2,9 @@
 
 除公开接口外，请求需要携带登录后的 `tt_session` Cookie（HttpOnly）。接口返回 JSON，导出接口返回文件。
 
-Base URL：`http://<host>:3100`
+生产 Base URL：`https://<your-domain>`；本机开发：`http://127.0.0.1:3100`。
+
+首次登录或管理员重置密码后，若 `user.must_change_password=1`，只能访问当前用户、改密和退出接口。其他受保护 API 返回 `403`，错误码 `PASSWORD_CHANGE_REQUIRED`。新密码为 12–128 位；改密成功会签发新 Cookie 并撤销旧 Cookie。退出会撤销账号的全部会话。限流返回 `429`；跨站写请求返回 `403`。
 
 ## 认证
 

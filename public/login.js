@@ -17,7 +17,7 @@ form.addEventListener('submit', async (event) => {
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || '登录失败');
-    window.location.href = '/';
+    window.location.href = payload.user.must_change_password ? '/change-password' : '/';
   } catch (err) {
     errorBox.textContent = err.message;
     errorBox.hidden = false;

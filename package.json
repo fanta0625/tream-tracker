@@ -5,12 +5,21 @@
   "description": "轻量团队工作追踪：按日期看全员工作、事项进度、更新履历，导出 Markdown/Excel",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node initialize.js && node server.js",
+    "dev": "node dev.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "nodemailer": "^10.2.1"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   }
 }

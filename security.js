@@ -39,6 +39,45 @@ function verifyPassword(password, stored) {
   }
 }
 
+function validatePassword(password) {
+  if (typeof password !== 'string' || password.length < 12 || password.length > 128) {
+    const error = new Error('密码需为 12–128 位');
+    error.status = 400;
+    throw error;
+  }
+}
+
+let passwordJobs = 0;
+async function derivePassword(password, salt) {
+  if (passwordJobs >= 4) {
+    const error = new Error('密码服务繁忙，请稍后再试');
+    error.status = 429;
+    throw error;
+  }
+  passwordJobs += 1;
+  try {
+    return await new Promise((resolve, reject) => {
+      crypto.scrypt(password, salt, 64, (error, value) => error ? reject(error) : resolve(value));
+    });
+  } finally {
+    passwordJobs -= 1;
+  }
+}
+
+async function hashPasswordAsync(password) {
+  validatePassword(password);
+  const salt = crypto.randomBytes(16).toString('hex');
+  return `scrypt$${salt}$${(await derivePassword(password, salt)).toString('hex')}`;
+}
+
+async function verifyPasswordAsync(password, stored) {
+  if (typeof password !== 'string' || password.length > 128) return false;
+  const [algo, salt, hash] = String(stored || '').split('$');
+  if (algo !== 'scrypt' || !/^[a-f0-9]{32}$/.test(salt) || !/^[a-f0-9]{128}$/.test(hash)) return false;
+  const actual = await derivePassword(password, salt);
+  return crypto.timingSafeEqual(actual, Buffer.from(hash, 'hex'));
+}
+
 
 function secretKey(context = 'default') {
   return crypto.createHash('sha256').update(`${SECRET}:${context}`).digest();
@@ -69,8 +108,8 @@ function hashCode(code) {
   return crypto.createHmac('sha256', SECRET).update(String(code)).digest('hex');
 }
 
-function signSession(userId, days = 7) {
-  const payload = { uid: Number(userId), exp: Date.now() + days * 86400000 };
+function signSession(userId, days = 7, version = 0) {
+  const payload = { uid: Number(userId), ver: version, exp: Date.now() + days * 86400000 };
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const signature = crypto.createHmac('sha256', SECRET).update(body).digest('base64url');
   return `${body}.${signature}`;
@@ -113,6 +152,9 @@ function parseCookies(header) {
 module.exports = {
   hashPassword,
   verifyPassword,
+  hashPasswordAsync,
+  verifyPasswordAsync,
+  validatePassword,
   encryptText,
   decryptText,
   hashCode,

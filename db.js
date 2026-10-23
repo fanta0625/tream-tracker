@@ -1,7 +1,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { hashPassword } = require('./security');
+const { hashPassword, hashPasswordAsync, validatePassword, verifyPassword } = require('./security');
+const crypto = require('node:crypto');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -233,7 +234,11 @@ addColumnIfMissing('updates', 'updated_at', 'TEXT');
 addColumnIfMissing('updates', 'edited_by', 'INTEGER');
 run('UPDATE updates SET updated_at = created_at WHERE updated_at IS NULL');
 addColumnIfMissing('users', 'email', 'TEXT');
+const hadUserStatus = all('PRAGMA table_info(users)').some(column => column.name === 'status');
 addColumnIfMissing('users', 'status', "TEXT NOT NULL DEFAULT 'active'");
+if (!hadUserStatus) run("UPDATE users SET status = CASE WHEN active = 1 THEN 'active' ELSE 'disabled' END");
+addColumnIfMissing('users', 'session_version', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
 
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email) WHERE email IS NOT NULL");
 run("UPDATE users SET role = 'leader' WHERE role = 'manager'");
@@ -286,7 +291,7 @@ function normalizeEmail(email) {
 }
 
 function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
+  return typeof email === 'string' && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 function attachUserGroups(user) {
@@ -373,7 +378,18 @@ function validateMemberLink(memberId, excludeUserId = 0) {
   return memberId;
 }
 
-function createUser(body = {}) {
+function assertAdminActor(actor) {
+  if (!actor) return;
+  const current = getUserById(actor.id);
+  if (!current || current.status !== 'active' || current.role !== 'admin'
+      || current.must_change_password || current.session_version !== actor.session_version) {
+    const err = new Error('管理员会话已失效，请重新登录');
+    err.status = 401;
+    throw err;
+  }
+}
+
+async function createUser(body = {}, options = {}) {
   const username = String(body.username || '').trim();
   if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) {
     const err = new Error('用户名需为 3-32 位字母、数字、下划线、点或横线');
@@ -381,11 +397,7 @@ function createUser(body = {}) {
     throw err;
   }
   const password = String(body.password || '');
-  if (password.length < 6) {
-    const err = new Error('密码至少 6 位');
-    err.status = 400;
-    throw err;
-  }
+  validatePassword(password);
   const role = ['admin', 'leader', 'member'].includes(body.role) ? body.role : 'member';
   const status = ['pending', 'active', 'disabled', 'rejected'].includes(body.status) ? body.status : 'active';
   const memberId = body.member_id ? Number(body.member_id) : null;
@@ -409,6 +421,8 @@ function createUser(body = {}) {
   }
 
   const displayName = String(body.display_name || '').trim() || username;
+  const passwordHash = await hashPasswordAsync(password);
+  assertAdminActor(options.actor);
   try {
     const result = run(`
       INSERT INTO users (username, email, password_hash, display_name, role, member_id, active, status, created_at)
@@ -416,7 +430,7 @@ function createUser(body = {}) {
     `, [
       username,
       email || null,
-      hashPassword(password),
+      passwordHash,
       displayName,
       role,
       memberId,
@@ -435,7 +449,9 @@ function createUser(body = {}) {
   }
 }
 
-function updateUser(id, body = {}) {
+async function updateUser(id, body = {}, options = {}) {
+  const passwordHash = body.password !== undefined ? await hashPasswordAsync(body.password) : null;
+  assertAdminActor(options.actor);
   const userId = Number(id);
   const current = getUserById(userId);
   if (!current) {
@@ -499,20 +515,32 @@ function updateUser(id, body = {}) {
   const effectiveMemberId = body.member_id !== undefined
     ? (body.member_id ? Number(body.member_id) : null)
     : current.member_id;
+  if (current.role === 'admin' && current.status === 'active'
+      && (effectiveRole !== 'admin' || effectiveStatus !== 'active') && countActiveAdmins(userId) === 0) {
+    const err = new Error('至少需要保留一个启用的管理员');
+    err.status = 400;
+    throw err;
+  }
   if (effectiveStatus === 'active' && effectiveRole === 'member' && !effectiveMemberId) {
     const err = new Error('启用的成员账号必须关联一个成员，请使用审核通过或先关联成员');
     err.status = 400;
     throw err;
   }
 
-  if (body.password !== undefined) {
-    const password = String(body.password || '');
-    if (password.length < 6) {
-      const err = new Error('密码至少 6 位');
-      err.status = 400;
-      throw err;
-    }
-    add('password_hash', hashPassword(password));
+  if (options.expectedVersion !== undefined && current.session_version !== options.expectedVersion) {
+    const err = new Error('会话已失效，请重新登录');
+    err.status = 401;
+    throw err;
+  }
+  if (passwordHash) {
+    add('password_hash', passwordHash);
+    add('must_change_password', options.passwordVerified ? 0 : 1);
+  }
+  if (passwordHash || nextStatus !== undefined || body.role !== undefined || body.email !== undefined) {
+    add('session_version', current.session_version + 1);
+  }
+  if (body.role !== undefined && body.role !== 'leader' && body.role !== 'admin') {
+    run('UPDATE groups SET leader_user_id = NULL WHERE leader_user_id = ?', [userId]);
   }
 
   if (!fields.length) return sanitizeUser(current);
@@ -657,6 +685,15 @@ function createGroup(body = {}) {
   }
 }
 
+function revokeFormerLeader(userId) {
+  if (!userId || get('SELECT id FROM groups WHERE leader_user_id = ?', [userId])) return;
+  const user = getUserById(userId);
+  if (user && user.role === 'leader') {
+    ensureMemberForUser(user);
+    run("UPDATE users SET role = 'member', session_version = session_version + 1 WHERE id = ?", [userId]);
+  }
+}
+
 function updateGroup(id, body = {}) {
   const groupId = Number(id);
   const group = getGroup(groupId);
@@ -706,6 +743,7 @@ function updateGroup(id, body = {}) {
     run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [Number(body.leader_user_id), groupId]);
     run("UPDATE users SET role = 'leader' WHERE id = ? AND role != 'admin'", [Number(body.leader_user_id)]);
   }
+  if (body.leader_user_id !== undefined) revokeFormerLeader(group.leader_user_id);
   return getGroup(groupId);
 }
 
@@ -742,6 +780,7 @@ function removeGroupMember(id, userId) {
   run('DELETE FROM user_groups WHERE group_id = ? AND user_id = ?', [groupId, targetUserId]);
   if (Number(group.leader_user_id) === targetUserId) {
     run('UPDATE groups SET leader_user_id = NULL WHERE id = ?', [groupId]);
+    revokeFormerLeader(targetUserId);
   }
   return getGroup(groupId);
 }
@@ -762,6 +801,10 @@ function setUserGroups(userId, groupIds = []) {
       throw err;
     }
   }
+  for (const group of all('SELECT id FROM groups WHERE leader_user_id = ?', [id])) {
+    if (!unique.includes(group.id)) run('UPDATE groups SET leader_user_id = NULL WHERE id = ?', [group.id]);
+  }
+  revokeFormerLeader(id);
   run('DELETE FROM user_groups WHERE user_id = ?', [id]);
   for (const groupId of unique) {
     run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [id, groupId]);
@@ -779,6 +822,10 @@ function isGroupLeader(userId, groupId) {
 
 function groupIdsForUser(userId) {
   return all('SELECT group_id FROM user_groups WHERE user_id = ?', [Number(userId)]).map((row) => row.group_id);
+}
+
+function revokeSessions(id) {
+  run('UPDATE users SET session_version = session_version + 1 WHERE id = ?', [Number(id)]);
 }
 
 function touchLogin(id) {
@@ -1020,7 +1067,14 @@ function getReport(id, user) {
     err.status = 404;
     throw err;
   }
-  const project = getProject(report.project_id, user);
+  const canView = canViewProject(user, report);
+  const isAuthor = Number(report.user_id) === Number(user.id);
+  if (!canView && !isAuthor && report.visibility !== 'public') {
+    const err = new Error('你没有权限查看该报告');
+    err.status = 403;
+    throw err;
+  }
+  const project = canView ? getProject(report.project_id, user) : { id: report.project_id, name: report.project_name };
   if (report.visibility === 'private' && user.role !== 'admin' && Number(report.user_id) !== Number(user.id)) {
     const err = new Error('你没有权限查看该报告');
     err.status = 403;
@@ -1189,6 +1243,7 @@ function getSettingsByPrefix(prefix) {
 }
 
 function createEmailCode(email, purpose, codeHash, expiresAt) {
+  run('DELETE FROM email_codes WHERE expires_at < ? OR used_at IS NOT NULL', [Date.now()]);
   const normalized = normalizeEmail(email);
   run('DELETE FROM email_codes WHERE email = ? AND purpose = ? AND used_at IS NULL', [normalized, String(purpose)]);
   run(`
@@ -1272,7 +1327,8 @@ function canEditUpdate(user, update) {
   if (!user || !update) return false;
   if (user.role === 'admin' || user.role === 'leader') return true;
   if (Number(update.actor_id) === Number(user.id)) return true;
-  if (user.member_id && Number(update.member_id) === Number(user.member_id)) return true;
+  const owner = get('SELECT member_id FROM items WHERE id = ?', [update.item_id]);
+  if (user.member_id && owner && Number(owner.member_id) === Number(user.member_id)) return true;
   return false;
 }
 
@@ -1867,12 +1923,15 @@ function backfillActors() {
 function seedUsersIfEmpty() {
   const count = Number(get('SELECT COUNT(*) AS c FROM users').c);
   if (count === 0) {
+    validatePassword(process.env.INITIAL_ADMIN_PASSWORD);
     const now = nowIso();
     run(`
       INSERT INTO users (username, password_hash, display_name, role, member_id, active, created_at)
       VALUES (?, ?, ?, 'admin', NULL, 1, ?)
-    `, ['admin', hashPassword(process.env.INITIAL_ADMIN_PASSWORD || 'admin123'), '管理员', now]);
+    `, ['admin', hashPassword(process.env.INITIAL_ADMIN_PASSWORD), '管理员', now]);
 
+    run('UPDATE users SET must_change_password = 1 WHERE username = ?', ['admin']);
+    createdInitialAdmin = true;
     const demoAccounts = {
       '张三': 'zhangsan',
       '李四': 'lisi',
@@ -1885,17 +1944,50 @@ function seedUsersIfEmpty() {
       run(`
         INSERT INTO users (username, password_hash, display_name, role, member_id, active, created_at)
         VALUES (?, ?, ?, 'member', ?, 1, ?)
-      `, [username, hashPassword('123456'), member.name, member.id, now]);
+      `, [username, hashPassword(crypto.randomBytes(24).toString('base64url')), member.name, member.id, now]);
+      run("UPDATE users SET status = 'disabled', active = 0, must_change_password = 1 WHERE username = ?", [username]);
     }
   }
   backfillActors();
 }
 
-if (process.env.SEED_DEMO !== '0') seedIfEmpty();
-seedUsersIfEmpty();
+let createdInitialAdmin = false;
+let rotatedDefaultAdmin = false;
+const rotatedAdminUsernames = [];
+if (!getSetting('initialized', '')) {
+  tx(() => {
+    const empty = !get('SELECT id FROM users LIMIT 1') && !get('SELECT id FROM members LIMIT 1');
+    if (empty && process.env.SEED_DEMO === '1') seedIfEmpty();
+    seedUsersIfEmpty();
+    setSetting('initialized', '1');
+  });
+}
+// One-time upgrade: repair inconsistent legacy disabled accounts and retire
+// published demo credentials. Initializer prints any replacement only to its terminal.
+if (!getSetting('security_hardening_v1', '')) {
+  tx(() => {
+    run("UPDATE users SET status = 'disabled' WHERE active = 0 AND status = 'active'");
+    for (const user of all('SELECT * FROM users')) {
+      if (user.role === 'admin' && verifyPassword('admin123', user.password_hash)) {
+        validatePassword(process.env.INITIAL_ADMIN_PASSWORD);
+        run('UPDATE users SET password_hash = ?, must_change_password = 1, session_version = session_version + 1 WHERE id = ?',
+          [hashPassword(process.env.INITIAL_ADMIN_PASSWORD), user.id]);
+        rotatedDefaultAdmin = true;
+        rotatedAdminUsernames.push(user.username);
+      } else if (['zhangsan', 'lisi', 'wangwu', 'zhaoliu'].includes(user.username) && verifyPassword('123456', user.password_hash)) {
+        run("UPDATE users SET status = 'disabled', active = 0, session_version = session_version + 1 WHERE id = ?", [user.id]);
+      }
+    }
+    setSetting('security_hardening_v1', '1');
+  });
+}
 
 module.exports = {
   DB_PATH,
+  createdInitialAdmin,
+  rotatedDefaultAdmin,
+  rotatedAdminUsernames,
+  revokeSessions,
   STATUSES,
   PRIORITIES,
   STATUS_LABELS,

@@ -5,13 +5,15 @@ const ExcelJS = require('exceljs');
 const db = require('./db');
 const auth = require('./auth');
 const mailer = require('./mailer');
-const { verifyPassword, hashCode } = require('./security');
+const { verifyPasswordAsync, validatePassword, hashCode } = require('./security');
+const { RateLimiter } = require('./rate-limit');
+const { configureNetwork } = require('./network-security');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3100);
 const TZ = process.env.TZ || 'Asia/Shanghai';
 
-if (process.env.TRUST_PROXY === '1') app.set('trust proxy', true);
+const HOST = configureNetwork(app);
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -22,7 +24,7 @@ class HttpError extends Error {
   }
 }
 
-const handle = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+const handle = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
 
 function formatDateCn(date) {
   return new Intl.DateTimeFormat('zh-CN', {
@@ -99,6 +101,16 @@ function buildMarkdown({ from, to, single }, memberId) {
 
   if (single) {
     const day = db.getDay(from);
+    if (memberId) {
+      day.members = day.members.filter(member => Number(member.id) === memberId);
+      const updates = day.members.flatMap(member => member.updates);
+      day.summary.membersUpdated = day.members.filter(member => member.updates.length).length;
+      day.summary.updates = updates.length;
+      day.summary.statusCounts = {};
+      for (const update of new Map(updates.map(update => [update.item_id, update])).values()) {
+        day.summary.statusCounts[update.status] = (day.summary.statusCounts[update.status] || 0) + 1;
+      }
+    }
     const summaryParts = [`${day.summary.membersUpdated} 人更新`, `${day.summary.updates} 条记录`];
     if (statusSummary(day.summary.statusCounts)) summaryParts.push(statusSummary(day.summary.statusCounts));
 
@@ -375,18 +387,20 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'UP', database: 'UP', time: new Date().toISOString() });
 });
 
-app.post('/api/auth/login', (req, res, next) => {
+app.post('/api/auth/login', handle(async (req, res, next) => {
   try {
     const { username, password } = req.body || {};
-    const user = auth.login(username, password, req.ip);
+    const user = await auth.login(username, password, req.ip);
     auth.setSessionCookie(res, user.id);
     res.json({ user: auth.publicUser(user) });
   } catch (err) {
     next(err);
   }
-});
+}));
 
 app.post('/api/auth/logout', (req, res) => {
+  const user = auth.getUserFromRequest(req);
+  if (user) db.revokeSessions(user.id);
   auth.clearSessionCookie(res);
   res.json({ ok: true });
 });
@@ -398,28 +412,13 @@ app.get('/api/auth/me', (req, res) => {
 });
 
 
-const codeRequestLog = new Map();
-
-function checkCodeRateLimit(key) {
-  const now = Date.now();
-  const record = codeRequestLog.get(key) || { last: 0, windowStart: now, count: 0 };
-  if (now - record.last < 60_000) {
-    const err = new Error('请 60 秒后再获取验证码');
-    err.status = 429;
-    throw err;
-  }
-  if (now - record.windowStart > 3600_000) {
-    record.windowStart = now;
-    record.count = 0;
-  }
-  if (record.count >= 5) {
-    const err = new Error('验证码请求过于频繁，请稍后再试');
-    err.status = 429;
-    throw err;
-  }
-  record.last = now;
-  record.count += 1;
-  codeRequestLog.set(key, record);
+const codeRequests = new RateLimiter();
+const passwordChanges = new RateLimiter();
+function checkCodeRateLimit(ip, email) {
+  codeRequests.consume('global', 100, 3600000);
+  codeRequests.consume(`ip:${ip}`, 10, 3600000);
+  codeRequests.consume(`email:${email}:hour`, 5, 3600000);
+  codeRequests.consume(`email:${email}:minute`, 1, 60000);
 }
 
 function usernameFromEmail(email) {
@@ -452,7 +451,7 @@ app.post('/api/auth/register/send-code', handle(async (req, res) => {
   if (db.getUserByEmail(email)) throw new HttpError(409, '该邮箱已注册或正在审核');
   if (!mailer.isConfigured()) throw new HttpError(503, '管理员尚未配置邮件服务，暂时无法自助注册');
 
-  checkCodeRateLimit(`${req.ip}|${email}`);
+  checkCodeRateLimit(req.ip, email);
   const code = String(crypto.randomInt(100000, 1000000));
   db.createEmailCode(email, 'register', hashCode(code), Date.now() + 10 * 60 * 1000);
   await mailer.sendVerificationCode(email, code);
@@ -468,13 +467,13 @@ app.post('/api/auth/register', handle(async (req, res) => {
 
   if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
   if (!/^\d{6}$/.test(code)) throw new HttpError(400, '验证码应为 6 位数字');
-  if (password.length < 6) throw new HttpError(400, '密码至少 6 位');
+  validatePassword(password);
   if (db.getUserByEmail(email)) throw new HttpError(409, '该邮箱已注册或正在审核');
 
   consumeEmailCode(email, 'register', code);
 
   const username = usernameFromEmail(email);
-  const user = db.createUser({
+  const user = await db.createUser({
     username,
     email,
     password,
@@ -495,11 +494,9 @@ app.post('/api/auth/forgot/send-code', handle(async (req, res) => {
   const email = db.normalizeEmail(req.body && req.body.email);
   if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
   if (!mailer.isConfigured()) throw new HttpError(503, '管理员尚未配置邮件服务，暂时无法找回密码');
+  checkCodeRateLimit(req.ip, email);
   const user = db.getUserByEmail(email);
-  if (!user) throw new HttpError(404, '该邮箱未注册');
-  if (user.status !== 'active') throw new HttpError(403, '账号当前不可用，请联系管理员');
-
-  checkCodeRateLimit(`${req.ip}|${email}|reset`);
+  if (!user || user.status !== 'active') return res.json({ ok: true, message: '如果该邮箱关联可用账号，验证码将发送至邮箱' });
   const code = String(crypto.randomInt(100000, 1000000));
   db.createEmailCode(email, 'reset_password', hashCode(code), Date.now() + 10 * 60 * 1000);
   await mailer.sendPasswordResetCode(email, code);
@@ -514,14 +511,14 @@ app.post('/api/auth/forgot/reset', handle(async (req, res) => {
 
   if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
   if (!/^\d{6}$/.test(code)) throw new HttpError(400, '验证码应为 6 位数字');
-  if (password.length < 6) throw new HttpError(400, '密码至少 6 位');
+  validatePassword(password);
 
   const user = db.getUserByEmail(email);
   if (!user) throw new HttpError(404, '该邮箱未注册');
   if (user.status !== 'active') throw new HttpError(403, '账号当前不可用，请联系管理员');
 
   consumeEmailCode(email, 'reset_password', code);
-  db.updateUser(user.id, { password });
+  await db.updateUser(user.id, { password }, { passwordVerified: true, expectedVersion: user.session_version });
   res.json({ ok: true, message: '密码已重置，请使用新密码登录' });
 }));
 
@@ -663,17 +660,18 @@ app.delete('/api/reports/:id', (req, res) => {
   res.json(db.deleteReport(req.params.id, req.user));
 });
 
-app.post('/api/auth/password', (req, res) => {
+app.post('/api/auth/password', handle(async (req, res) => {
   const { old_password, new_password } = req.body || {};
-  if (!verifyPassword(old_password, req.user.password_hash)) {
+  passwordChanges.consume(`user:${req.user.id}`, 5, 600000);
+  if (!await verifyPasswordAsync(old_password, req.user.password_hash)) {
     return res.status(400).json({ error: '原密码不正确' });
   }
-  if (String(new_password || '').length < 6) {
-    return res.status(400).json({ error: '新密码至少 6 位' });
-  }
-  db.updateUser(req.user.id, { password: new_password });
+  validatePassword(new_password);
+  if (new_password === old_password) throw new HttpError(400, '新密码不能与原密码相同');
+  await db.updateUser(req.user.id, { password: new_password }, { passwordVerified: true, expectedVersion: req.user.session_version });
+  auth.setSessionCookie(res, req.user.id);
   res.json({ ok: true });
-});
+}));
 
 app.get('/api/members', (req, res) => {
   res.json({ members: db.listMembers() });
@@ -688,14 +686,15 @@ app.get('/api/users', auth.requireAdmin, (req, res) => {
   res.json({ users: db.listUsers() });
 });
 
-app.post('/api/users', auth.requireAdmin, (req, res) => {
-  const user = db.createUser(req.body || {});
+app.post('/api/users', auth.requireAdmin, handle(async (req, res) => {
+  const user = await db.createUser(req.body || {}, { actor: req.user });
   res.status(201).json({ user });
-});
+}));
 
-app.patch('/api/users/:id', auth.requireAdmin, (req, res) => {
+app.patch('/api/users/:id', auth.requireAdmin, handle(async (req, res) => {
   const targetId = Number(req.params.id);
   const body = req.body || {};
+  if (body.active !== undefined && body.status === undefined) body.status = body.active ? 'active' : 'disabled';
   const target = db.getUserById(targetId);
   if (!target) return res.status(404).json({ error: '用户不存在' });
 
@@ -709,14 +708,14 @@ app.patch('/api/users/:id', auth.requireAdmin, (req, res) => {
   }
 
   const removingAdmin = target.role === 'admin'
-    && ((body.role && body.role !== 'admin') || body.status === 'disabled' || body.status === 'pending' || body.active === 0);
+    && ((body.role && body.role !== 'admin') || (body.status && body.status !== 'active') || body.active === 0);
   if (removingAdmin && db.countActiveAdmins(targetId) === 0) {
     return res.status(400).json({ error: '至少需要保留一个启用的管理员' });
   }
 
-  const user = db.updateUser(targetId, body);
+  const user = await db.updateUser(targetId, body, { actor: req.user });
   res.json({ user });
-});
+}));
 
 app.get('/api/items', (req, res) => {
   const items = db.listItems(req.query || {}).map((item) => ({ ...item, can_edit: canEdit(req.user, item) }));
@@ -820,6 +819,11 @@ app.use('/api', (req, res) => {
 
 // ---------- pages ----------
 
+app.get('/change-password', (req, res) => {
+  if (!auth.getUserFromRequest(req)) return res.redirect('/login');
+  res.sendFile(path.join(__dirname, 'public', 'change-password.html'));
+});
+
 app.get('/login', (req, res) => {
   if (auth.getUserFromRequest(req)) return res.redirect('/');
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
@@ -836,24 +840,35 @@ app.get('/forgot', (req, res) => {
 });
 
 app.use((req, res, next) => {
-  if (req.path === '/' && !auth.getUserFromRequest(req)) return res.redirect('/login');
+  if (req.path === '/' || req.path === '/index.html') {
+    const user = auth.getUserFromRequest(req);
+    if (!user) return res.redirect('/login');
+    if (user.must_change_password) return res.redirect('/change-password');
+  }
   next();
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('*', (req, res) => {
-  if (!auth.getUserFromRequest(req)) return res.redirect('/login');
+  const user = auth.getUserFromRequest(req);
+  if (!user) return res.redirect('/login');
+  if (user.must_change_password) return res.redirect('/change-password');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.use((err, req, res, next) => {
   const status = err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: err.message || '服务器错误' });
+  if (status === 429) res.setHeader('Retry-After', '60');
+  res.status(status).json({ error: status >= 500 ? '服务器错误，请稍后再试' : (err.message || '请求失败') });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Team Tracker 运行在 http://0.0.0.0:${PORT}`);
+const server = app.listen(PORT, HOST, () => {
+  console.log(`Team Tracker 运行在 http://${HOST}:${server.address().port}`);
   console.log(`数据库: ${db.DB_PATH}`);
 });
+
+server.requestTimeout = 30000;
+server.headersTimeout = 10000;
+server.maxRequestsPerSocket = 100;

@@ -28,10 +28,10 @@
         <button class="btn ghost" type="button" id="sendCodeBtn">发送验证码</button>
       </div>
       <label>新密码
-        <input type="password" name="password" minlength="6" autocomplete="new-password" required />
+        <input type="password" name="password" minlength="12" maxlength="128" autocomplete="new-password" required />
       </label>
       <label>确认新密码
-        <input type="password" name="confirm_password" minlength="6" autocomplete="new-password" required />
+        <input type="password" name="confirm_password" minlength="12" maxlength="128" autocomplete="new-password" required />
       </label>
       <div id="forgotError" class="form-error" hidden></div>
       <div id="forgotSuccess" class="form-success" hidden></div>

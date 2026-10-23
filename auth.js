@@ -1,16 +1,14 @@
 const db = require('./db');
-const { signSession, verifySession, parseCookies, verifyPassword } = require('./security');
+const { signSession, verifySession, parseCookies, verifyPasswordAsync } = require('./security');
 
 const COOKIE_NAME = 'tt_session';
 const SESSION_DAYS = 7;
-const LOGIN_WINDOW_MS = 10 * 60 * 1000;
-const LOGIN_MAX_ATTEMPTS = 5;
-
-const loginAttempts = new Map();
+const { RateLimiter } = require('./rate-limit');
+const loginAttempts = new RateLimiter();
 
 function publicUser(user) {
   if (!user) return null;
-  const { password_hash, ...rest } = user;
+  const { password_hash, session_version, ...rest } = user;
   return rest;
 }
 
@@ -19,16 +17,17 @@ function getUserFromRequest(req) {
   const payload = verifySession(cookies[COOKIE_NAME]);
   if (!payload) return null;
   const user = db.getUserById(payload.uid);
-  if (!user || user.status !== 'active') return null;
+  if (!user || user.status !== 'active' || payload.ver !== user.session_version) return null;
   return user;
 }
 
 function cookieOptions() {
-  return `Path=/; HttpOnly; SameSite=Lax${process.env.COOKIE_SECURE === '1' ? '; Secure' : ''}`;
+  return `Path=/; HttpOnly; SameSite=Lax${process.env.COOKIE_SECURE !== '0' ? '; Secure' : ''}`;
 }
 
 function setSessionCookie(res, userId) {
-  const token = signSession(userId, SESSION_DAYS);
+  const user = db.getUserById(userId);
+  const token = signSession(userId, SESSION_DAYS, user.session_version);
   res.setHeader(
     'Set-Cookie',
     `${COOKIE_NAME}=${encodeURIComponent(token)}; ${cookieOptions()}; Max-Age=${SESSION_DAYS * 86400}`
@@ -39,58 +38,36 @@ function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=; ${cookieOptions()}; Max-Age=0`);
 }
 
-function login(username, password, ip) {
-  const cleanUsername = String(username || '').trim();
-  if (!cleanUsername || !password) {
-    const err = new Error('请输入用户名和密码');
+async function login(username, password, ip) {
+  if (typeof username !== 'string' || username.length > 254 || typeof password !== 'string' || !password || password.length > 128) {
+    const err = new Error('用户名或密码格式不正确');
     err.status = 400;
     throw err;
   }
-
-  const key = `${ip || 'unknown'}|${cleanUsername.toLowerCase()}`;
-  const now = Date.now();
-  const record = loginAttempts.get(key);
-  if (record && record.reset > now && record.count >= LOGIN_MAX_ATTEMPTS) {
-    const err = new Error('尝试次数过多，请 10 分钟后再试');
-    err.status = 429;
-    throw err;
-  }
-
+  const cleanUsername = username.trim();
+  loginAttempts.consume('global', 300, 60000);
+  loginAttempts.consume(`ip:${ip}`, 30, 600000);
   const user = db.getUserByLogin(cleanUsername);
-  if (user && user.status === 'pending') {
-    const err = new Error('账号等待管理员审核');
-    err.status = 403;
-    throw err;
-  }
-  if (user && user.status === 'rejected') {
-    const err = new Error('注册申请未通过审核');
-    err.status = 403;
-    throw err;
-  }
-  if (user && user.status === 'disabled') {
-    const err = new Error('账号已停用');
-    err.status = 403;
-    throw err;
-  }
-  const valid = user && user.status === 'active' && verifyPassword(password, user.password_hash);
-  if (!valid) {
-    const next = record && record.reset > now ? record : { count: 0, reset: now + LOGIN_WINDOW_MS };
-    next.count += 1;
-    loginAttempts.set(key, next);
-    const err = new Error('用户名或密码错误');
+  // Username and email aliases share the same account budget.
+  loginAttempts.consume(`account:${user ? user.id : cleanUsername.toLowerCase()}`, 10, 600000);
+  const valid = user && user.status === 'active' && await verifyPasswordAsync(password, user.password_hash);
+  const current = user && db.getUserById(user.id);
+  if (!valid || !current || current.status !== 'active' || current.session_version !== user.session_version) {
+    const err = new Error('用户名或密码错误，或账号尚未启用');
     err.status = 401;
     throw err;
   }
-
-  loginAttempts.delete(key);
   db.touchLogin(user.id);
-  return user;
+  return current;
 }
 
 function requireAuth(req, res, next) {
   const user = getUserFromRequest(req);
   if (!user) return res.status(401).json({ error: '请先登录' });
   req.user = user;
+  if (user.must_change_password && req.path !== '/auth/password') {
+    return res.status(403).json({ error: '请先修改初始密码', code: 'PASSWORD_CHANGE_REQUIRED' });
+  }
   next();
 }
 
