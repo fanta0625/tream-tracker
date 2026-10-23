@@ -267,6 +267,98 @@ async function buildWorkbook({ from, to }, memberId) {
   return { workbook, rows };
 }
 
+
+function visibilityLabel(visibility) {
+  return { private: '仅自己', group: '同组可见', public: '所有登录用户' }[visibility] || visibility;
+}
+
+function reportTypeLabel(type) {
+  return type === 'weekly' ? '周报' : '日报';
+}
+
+function reportDateLabel(report) {
+  if (report.type !== 'weekly') return report.report_date;
+  const start = db.normalizeWeekStart(report.report_date);
+  return `${start} ~ ${db.addDays(start, 6)}`;
+}
+
+function buildReportsMarkdown(project, reports) {
+  const lines = [`# ${mdEscape(project.name)} · 项目报告`, ''];
+  lines.push(`> 组：${mdEscape(project.group_name)} · 共 ${reports.length} 份报告`, '');
+  if (!reports.length) {
+    lines.push('该时间范围内暂无报告。', '');
+    return `${lines.join('\n').trim()}\n`;
+  }
+  for (const report of reports) {
+    lines.push(`## ${reportDateLabel(report)} · ${reportTypeLabel(report.type)}`, '');
+    lines.push(`### ${mdEscape(report.author_name)} · ${visibilityLabel(report.visibility)}`, '');
+    const sections = [
+      [report.type === 'weekly' ? '本周完成' : '今日完成', report.done],
+      ['进行中', report.doing],
+      ['问题 / 风险', report.blockers],
+      [report.type === 'weekly' ? '下周计划' : '明日计划', report.next_plan],
+    ];
+    for (const [label, value] of sections) {
+      if (!value) continue;
+      lines.push(`**${label}**`, '', mdEscape(value), '');
+    }
+  }
+  lines.push('---', `由 Team Tracker 生成 · ${formatDateTime(new Date().toISOString())}`, '');
+  return `${lines.join('\n').trim()}\n`;
+}
+
+async function buildReportsWorkbook(project, reports) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Team Tracker';
+  workbook.created = new Date();
+  const sheet = workbook.addWorksheet('项目报告');
+  sheet.columns = [
+    { header: '日期 / 周期', key: 'date', width: 22 },
+    { header: '类型', key: 'type', width: 8 },
+    { header: '作者', key: 'author', width: 12 },
+    { header: '可见性', key: 'visibility', width: 12 },
+    { header: '完成内容', key: 'done', width: 36 },
+    { header: '进行中', key: 'doing', width: 26 },
+    { header: '问题 / 风险', key: 'blockers', width: 26 },
+    { header: '下一步计划', key: 'next_plan', width: 30 },
+    { header: '更新时间', key: 'updated_at', width: 20 },
+  ];
+  for (const report of reports) {
+    sheet.addRow({
+      date: reportDateLabel(report),
+      type: reportTypeLabel(report.type),
+      author: report.author_name,
+      visibility: visibilityLabel(report.visibility),
+      done: report.done,
+      doing: report.doing,
+      blockers: report.blockers,
+      next_plan: report.next_plan,
+      updated_at: formatDateTime(report.updated_at),
+    });
+  }
+  for (const key of ['done', 'doing', 'blockers', 'next_plan']) {
+    sheet.getColumn(key).alignment = { wrapText: true, vertical: 'top' };
+  }
+  styleHeader(sheet);
+
+  const info = workbook.addWorksheet('项目信息');
+  info.columns = [
+    { header: '项目', key: 'name', width: 28 },
+    { header: '组', key: 'group', width: 18 },
+    { header: '描述', key: 'description', width: 50 },
+    { header: '报告数', key: 'count', width: 10 },
+  ];
+  info.addRow({
+    name: project.name,
+    group: project.group_name,
+    description: project.description,
+    count: reports.length,
+  });
+  info.getColumn('description').alignment = { wrapText: true, vertical: 'top' };
+  styleHeader(info);
+  return workbook;
+}
+
 function canEdit(user, item) {
   return user.role === 'admin' || user.role === 'leader' || Number(item.member_id) === Number(user.member_id);
 }
@@ -452,6 +544,83 @@ app.post('/api/groups/:id/members', auth.requireAdmin, (req, res) => {
 
 app.delete('/api/groups/:id/members/:userId', auth.requireAdmin, (req, res) => {
   res.json({ group: db.removeGroupMember(req.params.id, req.params.userId) });
+});
+
+
+app.get('/api/projects', (req, res) => {
+  res.json({ projects: db.listProjects(req.user) });
+});
+
+app.post('/api/projects', (req, res) => {
+  res.status(201).json({ project: db.createProject(req.body || {}, req.user) });
+});
+
+app.get('/api/projects/:id', (req, res) => {
+  res.json({ project: db.getProject(req.params.id, req.user) });
+});
+
+app.patch('/api/projects/:id', (req, res) => {
+  res.json({ project: db.updateProject(req.params.id, req.body || {}, req.user) });
+});
+
+app.delete('/api/projects/:id', (req, res) => {
+  res.json(db.archiveProject(req.params.id, req.user));
+});
+
+app.get('/api/projects/:id/reports/export', handle(async (req, res) => {
+  const format = req.query.format === 'xlsx' ? 'xlsx' : 'markdown';
+  const { project, reports } = db.listReports(req.params.id, req.user, {
+    type: req.query.type,
+    from: req.query.from,
+    to: req.query.to,
+  });
+  const suffix = `${req.query.from || 'all'}_${req.query.to || 'all'}`;
+  if (format === 'xlsx') {
+    const workbook = await buildReportsWorkbook(project, reports);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="project-${project.id}-reports-${suffix}.xlsx"`);
+    await workbook.xlsx.write(res);
+    res.end();
+    return;
+  }
+  const markdown = buildReportsMarkdown(project, reports);
+  res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="project-${project.id}-reports-${suffix}.md"`);
+  res.send(markdown);
+}));
+
+app.get('/api/projects/:id/reports', (req, res) => {
+  res.json(db.listReports(req.params.id, req.user, {
+    type: req.query.type,
+    from: req.query.from,
+    to: req.query.to,
+  }));
+});
+
+app.post('/api/projects/:id/reports', (req, res) => {
+  res.status(201).json({ report: db.createReport(req.params.id, req.body || {}, req.user) });
+});
+
+app.get('/api/reports/public', (req, res) => {
+  res.json({
+    reports: db.listPublicReports(req.user, {
+      type: req.query.type,
+      from: req.query.from,
+      to: req.query.to,
+    }),
+  });
+});
+
+app.get('/api/reports/:id', (req, res) => {
+  res.json({ report: db.getReport(req.params.id, req.user) });
+});
+
+app.patch('/api/reports/:id', (req, res) => {
+  res.json({ report: db.updateReport(req.params.id, req.body || {}, req.user) });
+});
+
+app.delete('/api/reports/:id', (req, res) => {
+  res.json(db.deleteReport(req.params.id, req.user));
 });
 
 app.post('/api/auth/password', (req, res) => {

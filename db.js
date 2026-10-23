@@ -155,6 +155,38 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_email_codes_email ON email_codes(email, purpose);
 
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL REFERENCES groups(id),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_group_name ON projects(group_id, name);
+
+  CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    type TEXT NOT NULL DEFAULT 'daily',
+    report_date TEXT NOT NULL,
+    done TEXT NOT NULL DEFAULT '',
+    doing TEXT NOT NULL DEFAULT '',
+    blockers TEXT NOT NULL DEFAULT '',
+    next_plan TEXT NOT NULL DEFAULT '',
+    visibility TEXT NOT NULL DEFAULT 'group',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_unique
+    ON reports(project_id, user_id, type, report_date);
+  CREATE INDEX IF NOT EXISTS idx_reports_project_date ON reports(project_id, report_date);
+
   CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     member_id INTEGER NOT NULL REFERENCES members(id),
@@ -203,6 +235,7 @@ addColumnIfMissing('users', 'status', "TEXT NOT NULL DEFAULT 'active'");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email) WHERE email IS NOT NULL");
 run("UPDATE users SET role = 'leader' WHERE role = 'manager'");
 run("UPDATE users SET status = CASE WHEN active = 1 THEN 'active' ELSE 'disabled' END WHERE status IS NULL OR status = ''");
+run("UPDATE users SET role = 'leader' WHERE role = 'member' AND id IN (SELECT leader_user_id FROM groups WHERE leader_user_id IS NOT NULL)");
 
 function listMembers() {
   return all(`
@@ -263,6 +296,8 @@ function attachUserGroups(user) {
     WHERE ug.user_id = ?
     ORDER BY g.name
   `, [user.id]);
+  user.led_group_ids = all('SELECT id FROM groups WHERE leader_user_id = ? ORDER BY id', [user.id]).map((row) => row.id);
+  user.led_groups = all('SELECT id, name FROM groups WHERE leader_user_id = ? ORDER BY name', [user.id]);
   return user;
 }
 
@@ -547,13 +582,15 @@ function groupMembers(groupId) {
 function getGroup(id) {
   const group = get(`
     SELECT g.*, u.display_name AS leader_name,
-      (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id) AS member_count
+      (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id) AS member_count,
+      (SELECT COUNT(*) FROM projects p WHERE p.group_id = g.id AND p.status = 'active') AS project_count
     FROM groups g
     LEFT JOIN users u ON u.id = g.leader_user_id
     WHERE g.id = ?
   `, [Number(id)]);
   if (!group) return null;
   group.member_count = Number(group.member_count);
+  group.project_count = Number(group.project_count);
   group.members = groupMembers(group.id);
   return group;
 }
@@ -561,7 +598,8 @@ function getGroup(id) {
 function listGroups(user = null) {
   let sql = `
     SELECT g.*, u.display_name AS leader_name,
-      (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id) AS member_count
+      (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id) AS member_count,
+      (SELECT COUNT(*) FROM projects p WHERE p.group_id = g.id AND p.status = 'active') AS project_count
     FROM groups g
     LEFT JOIN users u ON u.id = g.leader_user_id
   `;
@@ -577,6 +615,7 @@ function listGroups(user = null) {
   return all(sql, params).map((group) => ({
     ...group,
     member_count: Number(group.member_count),
+    project_count: Number(group.project_count),
     members: groupMembers(group.id),
   }));
 }
@@ -600,7 +639,10 @@ function createGroup(body = {}) {
   try {
     const result = run('INSERT INTO groups (name, leader_user_id, created_at) VALUES (?, ?, ?)', [name, leaderId, nowIso()]);
     const groupId = Number(result.lastInsertRowid);
-    if (leaderId) run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [leaderId, groupId]);
+    if (leaderId) {
+      run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [leaderId, groupId]);
+      run("UPDATE users SET role = 'leader' WHERE id = ? AND role != 'admin'", [leaderId]);
+    }
     return getGroup(groupId);
   } catch (err) {
     if (String(err.message || '').includes('UNIQUE')) {
@@ -659,6 +701,7 @@ function updateGroup(id, body = {}) {
   }
   if (body.leader_user_id) {
     run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [Number(body.leader_user_id), groupId]);
+    run("UPDATE users SET role = 'leader' WHERE id = ? AND role != 'admin'", [Number(body.leader_user_id)]);
   }
   return getGroup(groupId);
 }
@@ -742,6 +785,387 @@ function touchLogin(id) {
 function countActiveAdmins(excludeUserId = 0) {
   const row = get("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND status = 'active' AND id != ?", [Number(excludeUserId)]);
   return Number(row.c);
+}
+
+
+const REPORT_TYPES = ['daily', 'weekly'];
+const VISIBILITIES = ['private', 'group', 'public'];
+
+function validReportType(value, fallback = 'daily') {
+  return REPORT_TYPES.includes(value) ? value : fallback;
+}
+
+function validVisibility(value, fallback = 'group') {
+  return VISIBILITIES.includes(value) ? value : fallback;
+}
+
+function normalizeWeekStart(date) {
+  const [y, m, d] = String(date).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const day = dt.getUTCDay();
+  const diff = (day + 6) % 7;
+  return addDays(date, -diff);
+}
+
+function canViewProject(user, project) {
+  if (!user || !project) return false;
+  if (user.role === 'admin') return true;
+  return isGroupMember(user.id, project.group_id) || isGroupLeader(user.id, project.group_id);
+}
+
+function canManageProject(user, project) {
+  if (!user || !project) return false;
+  if (user.role === 'admin') return true;
+  return isGroupLeader(user.id, project.group_id);
+}
+
+function canReportProject(user, project) {
+  if (!user || !project) return false;
+  if (user.role === 'admin') return true;
+  return isGroupMember(user.id, project.group_id) || isGroupLeader(user.id, project.group_id);
+}
+
+function projectAccess(project, user) {
+  return {
+    ...project,
+    report_count: Number(project.report_count || 0),
+    can_manage: canManageProject(user, project),
+    can_report: canReportProject(user, project),
+  };
+}
+
+function projectSelectSql() {
+  return `
+    SELECT p.*, g.name AS group_name, u.display_name AS creator_name,
+      (SELECT COUNT(*) FROM reports r WHERE r.project_id = p.id) AS report_count,
+      (SELECT MAX(r.report_date) FROM reports r WHERE r.project_id = p.id) AS last_report_date
+    FROM projects p
+    JOIN groups g ON g.id = p.group_id
+    LEFT JOIN users u ON u.id = p.created_by
+  `;
+}
+
+function listProjects(user) {
+  const where = ["p.status = 'active'"];
+  const params = [];
+  if (user.role !== 'admin') {
+    where.push(`(
+      p.group_id IN (SELECT group_id FROM user_groups WHERE user_id = ?)
+      OR p.group_id IN (SELECT id FROM groups WHERE leader_user_id = ?)
+    )`);
+    params.push(user.id, user.id);
+  }
+  const rows = all(`${projectSelectSql()} WHERE ${where.join(' AND ')} ORDER BY g.name, p.name`, params);
+  return rows.map((row) => projectAccess(row, user));
+}
+
+function getProject(id, user) {
+  const project = get(`${projectSelectSql()} WHERE p.id = ?`, [Number(id)]);
+  if (!project) {
+    const err = new Error('项目不存在');
+    err.status = 404;
+    throw err;
+  }
+  if (!canViewProject(user, project)) {
+    const err = new Error('你没有权限查看该项目');
+    err.status = 403;
+    throw err;
+  }
+  return projectAccess(project, user);
+}
+
+function createProject(body = {}, user) {
+  const groupId = Number(body.group_id);
+  const group = getGroup(groupId);
+  if (!group) {
+    const err = new Error('请选择有效的组');
+    err.status = 400;
+    throw err;
+  }
+  if (user.role !== 'admin' && !isGroupLeader(user.id, groupId)) {
+    const err = new Error('只有组长或管理员可以创建项目');
+    err.status = 403;
+    throw err;
+  }
+  const name = String(body.name || '').trim();
+  if (!name) {
+    const err = new Error('项目名称不能为空');
+    err.status = 400;
+    throw err;
+  }
+  try {
+    const result = run(`
+      INSERT INTO projects (group_id, name, description, status, created_by, created_at, updated_at)
+      VALUES (?, ?, ?, 'active', ?, ?, ?)
+    `, [groupId, name, String(body.description || '').trim(), user.id, nowIso(), nowIso()]);
+    return getProject(Number(result.lastInsertRowid), user);
+  } catch (err) {
+    if (String(err.message || '').includes('UNIQUE')) {
+      const conflict = new Error('该组下已有同名项目');
+      conflict.status = 409;
+      throw conflict;
+    }
+    throw err;
+  }
+}
+
+function updateProject(id, body = {}, user) {
+  const project = getProject(id, user);
+  if (!project.can_manage) {
+    const err = new Error('只有组长或管理员可以修改项目');
+    err.status = 403;
+    throw err;
+  }
+  const fields = [];
+  const params = [];
+  if (body.name !== undefined) {
+    const name = String(body.name || '').trim();
+    if (!name) {
+      const err = new Error('项目名称不能为空');
+      err.status = 400;
+      throw err;
+    }
+    fields.push('name = ?');
+    params.push(name);
+  }
+  if (body.description !== undefined) {
+    fields.push('description = ?');
+    params.push(String(body.description || '').trim());
+  }
+  if (body.status !== undefined) {
+    if (!['active', 'archived'].includes(body.status)) {
+      const err = new Error('项目状态不合法');
+      err.status = 400;
+      throw err;
+    }
+    fields.push('status = ?');
+    params.push(body.status);
+  }
+  if (!fields.length) return project;
+  fields.push('updated_at = ?');
+  params.push(nowIso(), Number(id));
+  try {
+    run(`UPDATE projects SET ${fields.join(', ')} WHERE id = ?`, params);
+  } catch (err) {
+    if (String(err.message || '').includes('UNIQUE')) {
+      const conflict = new Error('该组下已有同名项目');
+      conflict.status = 409;
+      throw conflict;
+    }
+    throw err;
+  }
+  return getProject(id, user);
+}
+
+function archiveProject(id, user) {
+  return updateProject(id, { status: 'archived' }, user);
+}
+
+function listReports(projectId, user, filters = {}) {
+  const project = getProject(projectId, user);
+  const where = ['r.project_id = ?'];
+  const params = [project.id];
+
+  if (filters.type && REPORT_TYPES.includes(filters.type)) {
+    where.push('r.type = ?');
+    params.push(filters.type);
+  }
+  if (filters.from && isDate(filters.from)) {
+    where.push('r.report_date >= ?');
+    params.push(filters.from);
+  }
+  if (filters.to && isDate(filters.to)) {
+    where.push('r.report_date <= ?');
+    params.push(filters.to);
+  }
+
+  const groupMember = isGroupMember(user.id, project.group_id) || isGroupLeader(user.id, project.group_id);
+  if (user.role !== 'admin') {
+    if (groupMember) {
+      where.push("(r.user_id = ? OR r.visibility IN ('group', 'public'))");
+    } else {
+      where.push("(r.user_id = ? OR r.visibility = 'public')");
+    }
+    params.push(user.id);
+  }
+
+  const reports = all(`
+    SELECT r.*, u.display_name AS author_name, u.username AS author_username
+    FROM reports r
+    JOIN users u ON u.id = r.user_id
+    WHERE ${where.join(' AND ')}
+    ORDER BY r.report_date DESC, r.created_at DESC, r.id DESC
+  `, params).map((report) => ({
+    ...report,
+    can_edit: user.role === 'admin' || Number(report.user_id) === Number(user.id),
+  }));
+
+  return { project, reports };
+}
+
+function getReport(id, user) {
+  const report = get(`
+    SELECT r.*, u.display_name AS author_name, u.username AS author_username,
+      p.name AS project_name, p.group_id
+    FROM reports r
+    JOIN users u ON u.id = r.user_id
+    JOIN projects p ON p.id = r.project_id
+    WHERE r.id = ?
+  `, [Number(id)]);
+  if (!report) {
+    const err = new Error('报告不存在');
+    err.status = 404;
+    throw err;
+  }
+  const project = getProject(report.project_id, user);
+  if (report.visibility === 'private' && user.role !== 'admin' && Number(report.user_id) !== Number(user.id)) {
+    const err = new Error('你没有权限查看该报告');
+    err.status = 403;
+    throw err;
+  }
+  return {
+    ...report,
+    project,
+    can_edit: user.role === 'admin' || Number(report.user_id) === Number(user.id),
+  };
+}
+
+function createReport(projectId, body = {}, user) {
+  const project = getProject(projectId, user);
+  if (!project.can_report) {
+    const err = new Error('你不是该组组员，不能在此项目下写报告');
+    err.status = 403;
+    throw err;
+  }
+
+  const type = validReportType(body.type, 'daily');
+  let reportDate = String(body.report_date || '').trim();
+  if (!isDate(reportDate)) {
+    const err = new Error('报告日期格式应为 YYYY-MM-DD');
+    err.status = 400;
+    throw err;
+  }
+  if (type === 'weekly') reportDate = normalizeWeekStart(reportDate);
+  const visibility = validVisibility(body.visibility, 'group');
+
+  const existing = get(
+    'SELECT id FROM reports WHERE project_id = ? AND user_id = ? AND type = ? AND report_date = ?',
+    [project.id, user.id, type, reportDate]
+  );
+  if (existing) {
+    const err = new Error('该日期已有报告，请直接编辑');
+    err.status = 409;
+    throw err;
+  }
+
+  const now = nowIso();
+  const result = run(`
+    INSERT INTO reports
+      (project_id, user_id, type, report_date, done, doing, blockers, next_plan, visibility, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    project.id,
+    user.id,
+    type,
+    reportDate,
+    String(body.done || '').trim(),
+    String(body.doing || '').trim(),
+    String(body.blockers || '').trim(),
+    String(body.next_plan || '').trim(),
+    visibility,
+    now,
+    now,
+  ]);
+  return getReport(Number(result.lastInsertRowid), user);
+}
+
+function updateReport(id, body = {}, user) {
+  const report = getReport(id, user);
+  if (!report.can_edit) {
+    const err = new Error('只有作者或管理员可以修改报告');
+    err.status = 403;
+    throw err;
+  }
+
+  const type = body.type !== undefined ? validReportType(body.type, report.type) : report.type;
+  let reportDate = body.report_date !== undefined ? String(body.report_date || '').trim() : report.report_date;
+  if (!isDate(reportDate)) {
+    const err = new Error('报告日期格式应为 YYYY-MM-DD');
+    err.status = 400;
+    throw err;
+  }
+  if (type === 'weekly') reportDate = normalizeWeekStart(reportDate);
+  const visibility = body.visibility !== undefined ? validVisibility(body.visibility, report.visibility) : report.visibility;
+
+  const duplicate = get(`
+    SELECT id FROM reports
+    WHERE project_id = ? AND user_id = ? AND type = ? AND report_date = ? AND id != ?
+  `, [report.project_id, report.user_id, type, reportDate, report.id]);
+  if (duplicate) {
+    const err = new Error('该日期已有报告');
+    err.status = 409;
+    throw err;
+  }
+
+  run(`
+    UPDATE reports SET type = ?, report_date = ?, done = ?, doing = ?, blockers = ?, next_plan = ?,
+      visibility = ?, updated_at = ?
+    WHERE id = ?
+  `, [
+    type,
+    reportDate,
+    body.done !== undefined ? String(body.done || '').trim() : report.done,
+    body.doing !== undefined ? String(body.doing || '').trim() : report.doing,
+    body.blockers !== undefined ? String(body.blockers || '').trim() : report.blockers,
+    body.next_plan !== undefined ? String(body.next_plan || '').trim() : report.next_plan,
+    visibility,
+    nowIso(),
+    report.id,
+  ]);
+  return getReport(report.id, user);
+}
+
+function deleteReport(id, user) {
+  const report = getReport(id, user);
+  if (!report.can_edit) {
+    const err = new Error('只有作者或管理员可以删除报告');
+    err.status = 403;
+    throw err;
+  }
+  run('DELETE FROM reports WHERE id = ?', [report.id]);
+  return { ok: true };
+}
+
+
+function listPublicReports(user, filters = {}) {
+  const where = ["r.visibility = 'public'", "p.status = 'active'"];
+  const params = [];
+  if (filters.type && REPORT_TYPES.includes(filters.type)) {
+    where.push('r.type = ?');
+    params.push(filters.type);
+  }
+  if (filters.from && isDate(filters.from)) {
+    where.push('r.report_date >= ?');
+    params.push(filters.from);
+  }
+  if (filters.to && isDate(filters.to)) {
+    where.push('r.report_date <= ?');
+    params.push(filters.to);
+  }
+  return all(`
+    SELECT r.*, u.display_name AS author_name, u.username AS author_username,
+      p.name AS project_name, p.group_id, g.name AS group_name
+    FROM reports r
+    JOIN users u ON u.id = r.user_id
+    JOIN projects p ON p.id = r.project_id
+    JOIN groups g ON g.id = p.group_id
+    WHERE ${where.join(' AND ')}
+    ORDER BY r.report_date DESC, r.created_at DESC, r.id DESC
+    LIMIT 200
+  `, params).map((report) => ({
+    ...report,
+    can_edit: user.role === 'admin' || Number(report.user_id) === Number(user.id),
+  }));
 }
 
 function getSetting(key, fallback = '') {
@@ -1391,6 +1815,20 @@ module.exports = {
   isGroupMember,
   isGroupLeader,
   groupIdsForUser,
+  REPORT_TYPES,
+  VISIBILITIES,
+  normalizeWeekStart,
+  listProjects,
+  getProject,
+  createProject,
+  updateProject,
+  archiveProject,
+  listReports,
+  getReport,
+  createReport,
+  updateReport,
+  deleteReport,
+  listPublicReports,
   getSetting,
   setSetting,
   getSettingsByPrefix,

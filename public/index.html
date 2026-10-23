@@ -16,6 +16,7 @@
       </div>
     </div>
     <nav class="nav">
+      <button class="nav-btn" data-view="projects">项目</button>
       <button class="nav-btn active" data-view="daily">日报</button>
       <button class="nav-btn" data-view="items">事项</button>
       <button class="nav-btn" data-view="summary">汇总</button>
@@ -35,6 +36,16 @@
   </header>
 
   <main class="page">
+    <section id="projectsView" hidden>
+      <div class="toolbar wrap">
+        <select id="projectGroupFilter" class="select"></select>
+        <div class="toolbar-spacer"></div>
+        <button class="btn ghost" id="publicReportsBtn">公开报告</button>
+        <button class="btn primary" id="newProjectBtn" hidden>+ 新建项目</button>
+      </div>
+      <div class="member-grid" id="projectsList"></div>
+    </section>
+
     <section id="dailyView">
       <div class="toolbar">
         <div class="date-nav">
