@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>忘记密码 · Team Tracker</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="login-page">
+  <main class="login-card register-card">
+    <div class="login-brand">
+      <span class="brand-mark">TT</span>
+      <div>
+        <strong>Team Tracker</strong>
+        <span>团队工作追踪</span>
+      </div>
+    </div>
+    <h1>忘记密码</h1>
+    <p class="muted">用注册邮箱接收验证码，然后设置新密码。</p>
+    <form id="forgotForm" class="form">
+      <label>邮箱
+        <input type="email" name="email" autocomplete="email" required />
+      </label>
+      <div class="code-row">
+        <label>验证码
+          <input name="code" inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" required />
+        </label>
+        <button class="btn ghost" type="button" id="sendCodeBtn">发送验证码</button>
+      </div>
+      <label>新密码
+        <input type="password" name="password" minlength="6" autocomplete="new-password" required />
+      </label>
+      <label>确认新密码
+        <input type="password" name="confirm_password" minlength="6" autocomplete="new-password" required />
+      </label>
+      <div id="forgotError" class="form-error" hidden></div>
+      <div id="forgotSuccess" class="form-success" hidden></div>
+      <button class="btn primary" type="submit">重置密码</button>
+    </form>
+    <p class="login-hint muted">想起密码了？<a href="/login">返回登录</a></p>
+  </main>
+  <script src="/forgot.js"></script>
+</body>
+</html>

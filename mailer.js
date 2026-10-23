@@ -159,6 +159,26 @@ async function sendVerificationCode(email, code) {
   return sendMail({ to: email, subject, text, html });
 }
 
+
+async function sendPasswordResetCode(email, code) {
+  const subject = 'Team Tracker 重置密码验证码';
+  const text = [
+    '你正在重置 Team Tracker 登录密码。',
+    '',
+    `验证码：${code}`,
+    '',
+    '验证码 10 分钟内有效。如果这不是你本人的操作，请忽略这封邮件。',
+  ].join('\n');
+  const html = `
+    <div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;line-height:1.6;color:#1f2330">
+      <h2 style="margin:0 0 12px">Team Tracker 重置密码</h2>
+      <p>你正在重置登录密码，验证码是：</p>
+      <p style="font-size:30px;font-weight:800;letter-spacing:6px;color:#4f46e5;margin:16px 0">${code}</p>
+      <p>验证码 10 分钟内有效。如果这不是你本人的操作，请忽略这封邮件。</p>
+    </div>`;
+  return sendMail({ to: email, subject, text, html });
+}
+
 async function sendApproved(email, name) {
   if (!email) return null;
   const subject = 'Team Tracker 账号审核通过';
@@ -189,6 +209,7 @@ module.exports = {
   isConfigured,
   sendMail,
   sendVerificationCode,
+  sendPasswordResetCode,
   sendApproved,
   sendTest,
 };

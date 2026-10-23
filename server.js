@@ -434,6 +434,18 @@ function usernameFromEmail(email) {
   return candidate;
 }
 
+
+function consumeEmailCode(email, purpose, code) {
+  const record = db.getLatestEmailCode(email, purpose);
+  if (!record) throw new HttpError(400, '请先获取验证码');
+  if (Number(record.attempts) >= 5) throw new HttpError(400, '验证码尝试次数过多，请重新获取');
+  if (Number(record.expires_at) < Date.now()) throw new HttpError(400, '验证码已过期，请重新获取');
+  db.incrementEmailCodeAttempts(record.id);
+  if (hashCode(code) !== record.code_hash) throw new HttpError(400, '验证码不正确');
+  db.markEmailCodeUsed(record.id);
+  return record;
+}
+
 app.post('/api/auth/register/send-code', handle(async (req, res) => {
   const email = db.normalizeEmail(req.body && req.body.email);
   if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
@@ -459,14 +471,7 @@ app.post('/api/auth/register', handle(async (req, res) => {
   if (password.length < 6) throw new HttpError(400, '密码至少 6 位');
   if (db.getUserByEmail(email)) throw new HttpError(409, '该邮箱已注册或正在审核');
 
-  const record = db.getLatestEmailCode(email, 'register');
-  if (!record) throw new HttpError(400, '请先获取验证码');
-  if (Number(record.attempts) >= 5) throw new HttpError(400, '验证码尝试次数过多，请重新获取');
-  if (Number(record.expires_at) < Date.now()) throw new HttpError(400, '验证码已过期，请重新获取');
-
-  db.incrementEmailCodeAttempts(record.id);
-  if (hashCode(code) !== record.code_hash) throw new HttpError(400, '验证码不正确');
-  db.markEmailCodeUsed(record.id);
+  consumeEmailCode(email, 'register', code);
 
   const username = usernameFromEmail(email);
   const user = db.createUser({
@@ -483,6 +488,41 @@ app.post('/api/auth/register', handle(async (req, res) => {
     message: '注册成功，等待管理员审核',
     user: { id: user.id, email: user.email, display_name: user.display_name, status: user.status },
   });
+}));
+
+
+app.post('/api/auth/forgot/send-code', handle(async (req, res) => {
+  const email = db.normalizeEmail(req.body && req.body.email);
+  if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (!mailer.isConfigured()) throw new HttpError(503, '管理员尚未配置邮件服务，暂时无法找回密码');
+  const user = db.getUserByEmail(email);
+  if (!user) throw new HttpError(404, '该邮箱未注册');
+  if (user.status !== 'active') throw new HttpError(403, '账号当前不可用，请联系管理员');
+
+  checkCodeRateLimit(`${req.ip}|${email}|reset`);
+  const code = String(crypto.randomInt(100000, 1000000));
+  db.createEmailCode(email, 'reset_password', hashCode(code), Date.now() + 10 * 60 * 1000);
+  await mailer.sendPasswordResetCode(email, code);
+  res.json({ ok: true, message: '验证码已发送，请检查邮箱（包括垃圾邮件）' });
+}));
+
+app.post('/api/auth/forgot/reset', handle(async (req, res) => {
+  const body = req.body || {};
+  const email = db.normalizeEmail(body.email);
+  const code = String(body.code || '').trim();
+  const password = String(body.password || '');
+
+  if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (!/^\d{6}$/.test(code)) throw new HttpError(400, '验证码应为 6 位数字');
+  if (password.length < 6) throw new HttpError(400, '密码至少 6 位');
+
+  const user = db.getUserByEmail(email);
+  if (!user) throw new HttpError(404, '该邮箱未注册');
+  if (user.status !== 'active') throw new HttpError(403, '账号当前不可用，请联系管理员');
+
+  consumeEmailCode(email, 'reset_password', code);
+  db.updateUser(user.id, { password });
+  res.json({ ok: true, message: '密码已重置，请使用新密码登录' });
 }));
 
 // ---------- authenticated APIs ----------
@@ -775,6 +815,11 @@ app.get('/login', (req, res) => {
 app.get('/register', (req, res) => {
   if (auth.getUserFromRequest(req)) return res.redirect('/');
   res.sendFile(path.join(__dirname, 'public', 'register.html'));
+});
+
+app.get('/forgot', (req, res) => {
+  if (auth.getUserFromRequest(req)) return res.redirect('/');
+  res.sendFile(path.join(__dirname, 'public', 'forgot.html'));
 });
 
 app.use((req, res, next) => {
