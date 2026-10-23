@@ -135,37 +135,6 @@ SEED_DEMO=0 INITIAL_ADMIN_PASSWORD='换成一个强密码' ./start.sh
 - 邮件：Nodemailer（SMTP）
 - 前端：原生 HTML/CSS/JS，无构建步骤
 
-## 主要 API
+## API 文档
 
-| 方法 | 路径 | 权限 |
-|---|---|---|
-| POST | `/api/auth/login` / `/api/auth/logout` | 公开 |
-| POST | `/api/auth/register/send-code` / `/api/auth/register` | 公开（邮箱注册） |
-| POST | `/api/auth/forgot/send-code` / `/api/auth/forgot/reset` | 公开（忘记密码） |
-| GET | `/api/auth/me` | 登录 |
-| POST | `/api/auth/password` | 登录（改自己密码） |
-| GET | `/api/day?date=YYYY-MM-DD` | 登录 |
-| GET | `/api/summary?from=&to=` | 登录 |
-| GET | `/api/items?member_id=&status=&q=` | 登录 |
-| GET | `/api/items/:id` | 登录 |
-| POST | `/api/items` | 成员强制归自己；组长/管理员可指定 |
-| POST | `/api/items/:id/updates` | 负责人/组长/管理员 |
-| GET/PATCH/DELETE | `/api/updates/:id` | 作者/负责人/组长/管理员 |
-| PATCH/DELETE | `/api/items/:id` | 负责人/组长/管理员 |
-| GET | `/api/members` | 登录 |
-| POST | `/api/members` | 管理员 |
-| GET/POST/PATCH | `/api/users` | 管理员 |
-| GET/POST | `/api/groups` | 登录 / 管理员 |
-| PATCH | `/api/groups/:id` | 管理员 |
-| POST/DELETE | `/api/groups/:id/members` | 管理员 |
-| GET/PUT | `/api/admin/mail` | 管理员 |
-| POST | `/api/admin/mail/test` | 管理员 |
-| GET | `/api/admin/registrations` | 管理员 |
-| POST | `/api/admin/registrations/:id/approve` / `reject` | 管理员 |
-| GET/POST | `/api/projects` | 登录 / 组长或管理员创建 |
-| GET/PATCH/DELETE | `/api/projects/:id` | 项目可见者 / 组长或管理员 |
-| GET/POST | `/api/projects/:id/reports` | 项目可见者 / 组员、组长、管理员 |
-| GET/PATCH/DELETE | `/api/reports/:id` | 作者或管理员 |
-| GET | `/api/reports/public` | 登录（公开报告） |
-| GET | `/api/projects/:id/reports/export` | 项目可见者 |
-| GET | `/api/export/markdown` / `xlsx` | 登录 |
+接口清单见 [docs/API.md](docs/API.md)。
