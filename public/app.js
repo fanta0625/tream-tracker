@@ -892,7 +892,7 @@ async function openUsers() {
               </select>
             </div>
           </td>
-          <td>${esc(u.email || '-')}</td>
+          <td><input class="user-email" data-user-email="${u.id}" value="${esc(u.email || '')}" placeholder="设置邮箱" /></td>
           <td>
             <select data-user-role="${u.id}">
               ${['admin', 'leader', 'member'].map((role) => `<option value="${role}" ${u.role === role ? 'selected' : ''}>${roleLabel(role)}</option>`).join('')}
@@ -1046,6 +1046,20 @@ async function openUsers() {
         await openUsers();
       } catch (err) {
         toast(err.message, 'error');
+      }
+    }));
+
+    $$('[data-user-email]').forEach((input) => input.addEventListener('change', async () => {
+      try {
+        await api(`/api/users/${input.dataset.userEmail}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ email: input.value.trim() }),
+        });
+        toast('邮箱已更新');
+        await openUsers();
+      } catch (err) {
+        toast(err.message, 'error');
+        await openUsers();
       }
     }));
 

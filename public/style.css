@@ -667,3 +667,14 @@ body.modal-open { overflow: hidden; }
   .project-actions .btn { flex: 1; }
   .report-toolbar .date-input { width: 100%; }
 }
+
+.user-table input.user-email {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 12px;
+  width: 100%;
+  min-width: 150px;
+  background: #fff;
+}
