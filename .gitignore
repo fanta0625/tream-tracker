@@ -1,0 +1,12 @@
+node_modules/
+data/
+backups/
+logs/
+server.pid
+data-backup-*/
+.env
+*.log
+*.db
+*.secret
+.DS_Store
+npm-debug.log*

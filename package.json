@@ -1,0 +1,15 @@
+{
+  "name": "team-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "轻量团队工作追踪：按日期看全员工作、事项进度、更新履历，导出 Markdown/Excel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "exceljs": "^4.4.0"
+  }
+}

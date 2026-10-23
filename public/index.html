@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Team Tracker · 团队工作追踪</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">TT</span>
+      <div>
+        <strong>Team Tracker</strong>
+        <span>团队工作追踪</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-btn active" data-view="daily">日报</button>
+      <button class="nav-btn" data-view="items">事项</button>
+      <button class="nav-btn" data-view="summary">汇总</button>
+      <button class="nav-btn" data-view="members">成员</button>
+    </nav>
+    <div class="top-actions">
+      <button class="btn ghost" id="usersBtn" hidden>用户管理</button>
+      <div class="user-area">
+        <span class="user-chip"><strong id="userName"></strong><span id="userRole" class="role-pill"></span></span>
+        <button class="btn ghost" id="changePasswordBtn">修改密码</button>
+        <button class="btn ghost" id="logoutBtn">退出</button>
+      </div>
+      <button class="btn primary" id="newItemBtn">+ 新建事项</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <section id="dailyView">
+      <div class="toolbar">
+        <div class="date-nav">
+          <button class="btn icon" id="prevDay" title="前一天">‹</button>
+          <input type="date" id="datePicker" class="date-input" />
+          <button class="btn icon" id="nextDay" title="后一天">›</button>
+          <button class="btn ghost" id="todayBtn">今天</button>
+        </div>
+        <div class="date-label" id="dateLabel"></div>
+        <div class="toolbar-spacer"></div>
+        <a class="btn ghost" id="exportMd" href="#">导出 Markdown</a>
+        <a class="btn ghost" id="exportXlsx" href="#">导出 Excel</a>
+        <button class="btn ghost" id="exportRangeBtn">导出区间</button>
+      </div>
+
+      <div class="summary-grid" id="summaryCards"></div>
+      <div class="member-grid" id="dailyList"></div>
+    </section>
+
+    <section id="itemsView" hidden>
+      <div class="toolbar wrap">
+        <input type="search" id="searchInput" class="search" placeholder="搜索事项、项目、成员…" />
+        <select id="memberFilter" class="select"></select>
+        <select id="statusFilter" class="select">
+          <option value="">全部状态</option>
+          <option value="todo">待开始</option>
+          <option value="doing">进行中</option>
+          <option value="paused">已搁置</option>
+          <option value="blocked">被阻塞</option>
+          <option value="done">已完成</option>
+        </select>
+        <button class="btn ghost" id="clearFilters">清除筛选</button>
+        <div class="toolbar-spacer"></div>
+        <span class="muted" id="itemsCount"></span>
+      </div>
+      <div id="itemsTable" class="panel"></div>
+    </section>
+
+    <section id="summaryView" hidden>
+      <div class="toolbar wrap">
+        <input type="date" id="summaryFrom" class="date-input" />
+        <span class="muted">至</span>
+        <input type="date" id="summaryTo" class="date-input" />
+        <button class="btn ghost" id="summaryApply">查看</button>
+        <button class="btn ghost" data-summary-preset="7">最近 7 天</button>
+        <button class="btn ghost" data-summary-preset="30">最近 30 天</button>
+        <button class="btn ghost" data-summary-preset="month">本月</button>
+        <div class="toolbar-spacer"></div>
+        <a class="btn ghost" id="summaryExportMd" href="#">导出 Markdown</a>
+        <a class="btn ghost" id="summaryExportXlsx" href="#">导出 Excel</a>
+      </div>
+      <div class="summary-grid" id="summaryPageCards"></div>
+      <div class="member-grid" id="summaryMembers"></div>
+      <div id="summaryDays" class="panel pad" style="margin-top:16px"></div>
+    </section>
+
+    <section id="membersView" hidden>
+      <form class="inline-form panel" id="memberForm">
+        <strong>添加成员</strong>
+        <input name="name" placeholder="姓名" required />
+        <input name="role" placeholder="角色 / 职能，如 后端" />
+        <button class="btn primary" type="submit">添加</button>
+      </form>
+      <div class="member-grid" id="membersList"></div>
+    </section>
+  </main>
+
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
