@@ -229,6 +229,9 @@ function addColumnIfMissing(table, column, definition) {
 addColumnIfMissing('items', 'created_by', 'INTEGER');
 addColumnIfMissing('items', 'updated_by', 'INTEGER');
 addColumnIfMissing('updates', 'actor_id', 'INTEGER');
+addColumnIfMissing('updates', 'updated_at', 'TEXT');
+addColumnIfMissing('updates', 'edited_by', 'INTEGER');
+run('UPDATE updates SET updated_at = created_at WHERE updated_at IS NULL');
 addColumnIfMissing('users', 'email', 'TEXT');
 addColumnIfMissing('users', 'status', "TEXT NOT NULL DEFAULT 'active'");
 
@@ -1264,7 +1267,112 @@ function listItems(filters = {}) {
   });
 }
 
-function getItemDetail(id) {
+
+function canEditUpdate(user, update) {
+  if (!user || !update) return false;
+  if (user.role === 'admin' || user.role === 'leader') return true;
+  if (Number(update.actor_id) === Number(user.id)) return true;
+  if (user.member_id && Number(update.member_id) === Number(user.member_id)) return true;
+  return false;
+}
+
+function getWorkUpdate(id, user) {
+  const update = get(`
+    SELECT u.*, i.title AS item_title, i.member_id AS item_member_id,
+      m.name AS member_name,
+      COALESCE(au.display_name, m.name) AS actor_name,
+      eu.display_name AS editor_name
+    FROM updates u
+    JOIN items i ON i.id = u.item_id
+    JOIN members m ON m.id = u.member_id
+    LEFT JOIN users au ON au.id = u.actor_id
+    LEFT JOIN users eu ON eu.id = u.edited_by
+    WHERE u.id = ?
+  `, [Number(id)]);
+  if (!update) {
+    const err = new Error('更新记录不存在');
+    err.status = 404;
+    throw err;
+  }
+  const canEdit = canEditUpdate(user, update);
+  return {
+    update: { ...update, can_edit: canEdit },
+    item: {
+      id: update.item_id,
+      title: update.item_title,
+      member_id: update.item_member_id,
+      member_name: update.member_name,
+    },
+    can_edit: canEdit,
+  };
+}
+
+function recalcItemState(itemId) {
+  const latest = get(
+    'SELECT status, progress, actor_id, member_id FROM updates WHERE item_id = ? ORDER BY update_date DESC, id DESC LIMIT 1',
+    [itemId]
+  );
+  if (latest) {
+    run('UPDATE items SET status = ?, progress = ?, updated_at = ?, updated_by = ? WHERE id = ?', [
+      latest.status,
+      latest.progress,
+      nowIso(),
+      latest.actor_id || latest.member_id || null,
+      itemId,
+    ]);
+  } else {
+    run("UPDATE items SET status = 'todo', progress = 0, updated_at = ?, updated_by = NULL WHERE id = ?", [
+      nowIso(),
+      itemId,
+    ]);
+  }
+}
+
+function updateWorkUpdate(id, body = {}, user) {
+  const data = getWorkUpdate(id, user);
+  if (!data.can_edit) {
+    const err = new Error('你没有权限修改该更新记录');
+    err.status = 403;
+    throw err;
+  }
+  const update = data.update;
+  const updateDate = body.update_date !== undefined ? String(body.update_date || '').trim() : update.update_date;
+  if (!isDate(updateDate)) {
+    const err = new Error('日期格式应为 YYYY-MM-DD');
+    err.status = 400;
+    throw err;
+  }
+  const status = body.status !== undefined ? validStatus(body.status, update.status) : update.status;
+  const progress = body.progress !== undefined ? clampProgress(body.progress, Number(update.progress)) : Number(update.progress);
+  const note = body.note !== undefined ? String(body.note || '').trim() : update.note;
+  run(`
+    UPDATE updates SET update_date = ?, status = ?, progress = ?, note = ?,
+      edited_by = ?, updated_at = ?
+    WHERE id = ?
+  `, [updateDate, status, progress, note, user.id, nowIso(), update.id]);
+  recalcItemState(update.item_id);
+  return getWorkUpdate(update.id, user);
+}
+
+function deleteWorkUpdate(id, user) {
+  const data = getWorkUpdate(id, user);
+  if (!data.can_edit) {
+    const err = new Error('你没有权限删除该更新记录');
+    err.status = 403;
+    throw err;
+  }
+  const count = get('SELECT COUNT(*) AS c FROM updates WHERE item_id = ?', [data.update.item_id]);
+  if (Number(count.c) <= 1) {
+    const err = new Error('至少保留一条更新记录');
+    err.status = 400;
+    throw err;
+  }
+  run('DELETE FROM updates WHERE id = ?', [data.update.id]);
+  recalcItemState(data.update.item_id);
+  return { ok: true, item_id: data.update.item_id };
+}
+
+function getItemDetail(id, user = null) {
   const item = get(`
     SELECT i.*, m.name AS member_name, m.role AS member_role,
       cu.display_name AS created_by_name,
@@ -1286,10 +1394,12 @@ function getItemDetail(id) {
 
   const rows = all(`
     SELECT u.*, m.name AS member_name,
-      COALESCE(au.display_name, m.name) AS actor_name
+      COALESCE(au.display_name, m.name) AS actor_name,
+      eu.display_name AS editor_name
     FROM updates u
     JOIN members m ON m.id = u.member_id
     LEFT JOIN users au ON au.id = u.actor_id
+    LEFT JOIN users eu ON eu.id = u.edited_by
     WHERE u.item_id = ?
     ORDER BY u.update_date ASC, u.id ASC
   `, [Number(id)]);
@@ -1302,6 +1412,7 @@ function getItemDetail(id) {
       progress_delta: prev ? Number(row.progress) - Number(prev.progress) : null,
       prev_status: prev ? prev.status : null,
       status_changed: prev ? prev.status !== row.status : true,
+      can_edit: canEditUpdate(user, row),
     };
     prev = row;
     return out;
@@ -1318,8 +1429,8 @@ function getItemDetail(id) {
 
 function addUpdateRow(itemId, memberId, updateDate, status, progress, note, createdAt, actorId = null) {
   run(
-    'INSERT INTO updates (item_id, member_id, update_date, status, progress, note, created_at, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [itemId, memberId, updateDate, status, progress, note, createdAt, actorId]
+    'INSERT INTO updates (item_id, member_id, update_date, status, progress, note, created_at, updated_at, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [itemId, memberId, updateDate, status, progress, note, createdAt, createdAt, actorId]
   );
   const latest = get(
     'SELECT status, progress FROM updates WHERE item_id = ? ORDER BY update_date DESC, id DESC LIMIT 1',
@@ -1390,7 +1501,7 @@ function createItem(body = {}, actor = null) {
     return id;
   });
 
-  return getItemDetail(itemId);
+  return getItemDetail(itemId, actor);
 }
 
 function updateItemMeta(id, body = {}, actor = null) {
@@ -1434,13 +1545,13 @@ function updateItemMeta(id, body = {}, actor = null) {
     add('member_id', memberId);
   }
 
-  if (!fields.length) return getItemDetail(itemId);
+  if (!fields.length) return getItemDetail(itemId, actor);
 
   add('updated_by', actor ? actor.id : current.updated_by ?? null);
   add('updated_at', nowIso());
   params.push(itemId);
   run(`UPDATE items SET ${fields.join(', ')} WHERE id = ?`, params);
-  return getItemDetail(itemId);
+  return getItemDetail(itemId, actor);
 }
 
 function addUpdate(itemId, body = {}, actor = null) {
@@ -1459,7 +1570,7 @@ function addUpdate(itemId, body = {}, actor = null) {
   const createdAt = nowIso();
 
   addUpdateRow(id, item.member_id, updateDate, status, progress, note, createdAt, actor ? actor.id : null);
-  return getItemDetail(id);
+  return getItemDetail(id, actor);
 }
 
 function archiveItem(id, actor = null) {
@@ -1478,22 +1589,25 @@ function archiveItem(id, actor = null) {
   return { ok: true };
 }
 
-function getDay(date) {
+function getDay(date, user = null) {
   const day = isDate(date) ? date : todayStr();
   const members = listMembers();
 
   const rows = all(`
     SELECT u.id, u.item_id, u.update_date, u.status, u.progress, u.note, u.created_at,
-      u.actor_id, COALESCE(au.display_name, m.name) AS actor_name,
+      u.updated_at, u.actor_id, u.edited_by,
+      COALESCE(au.display_name, m.name) AS actor_name,
+      eu.display_name AS editor_name,
       i.title, i.project, i.priority, i.due_date,
       m.id AS member_id, m.name AS member_name, m.role AS member_role
     FROM updates u
     JOIN items i ON i.id = u.item_id
     JOIN members m ON m.id = u.member_id
     LEFT JOIN users au ON au.id = u.actor_id
+    LEFT JOIN users eu ON eu.id = u.edited_by
     WHERE u.update_date = ? AND i.archived = 0
     ORDER BY m.id, u.created_at, u.id
-  `, [day]);
+  `, [day]).map((row) => ({ ...row, can_edit: canEditUpdate(user, row) }));
 
   const byMember = new Map();
   for (const m of members) byMember.set(m.id, []);
@@ -1678,8 +1792,8 @@ function seedIfEmpty() {
   function upd(itemId, memberId, date, status, progress, note, time) {
     const ts = atLocal(date, time);
     run(
-      'INSERT INTO updates (item_id, member_id, update_date, status, progress, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [itemId, memberId, date, status, progress, note, ts]
+      'INSERT INTO updates (item_id, member_id, update_date, status, progress, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [itemId, memberId, date, status, progress, note, ts, ts]
     );
     run('UPDATE items SET status = ?, progress = ?, updated_at = ? WHERE id = ?', [status, progress, ts, itemId]);
   }
@@ -1841,6 +1955,9 @@ module.exports = {
   createItem,
   updateItemMeta,
   addUpdate,
+  getWorkUpdate,
+  updateWorkUpdate,
+  deleteWorkUpdate,
   archiveItem,
   getDay,
   getSummary,

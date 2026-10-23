@@ -364,7 +364,7 @@ function canEdit(user, item) {
 }
 
 function itemWithAccess(id, user) {
-  const item = db.getItemDetail(id);
+  const item = db.getItemDetail(id, user);
   item.can_edit = canEdit(user, item);
   return item;
 }
@@ -734,7 +734,7 @@ app.post('/api/items', (req, res) => {
 });
 
 app.patch('/api/items/:id', (req, res) => {
-  const existing = db.getItemDetail(req.params.id);
+  const existing = db.getItemDetail(req.params.id, req.user);
   if (!canEdit(req.user, existing)) return res.status(403).json({ error: '你没有权限修改该事项' });
   if (req.body && req.body.member_id !== undefined && !auth.isLeader(req.user)) {
     return res.status(403).json({ error: '只有组长或管理员可以转移负责人' });
@@ -745,7 +745,7 @@ app.patch('/api/items/:id', (req, res) => {
 });
 
 app.post('/api/items/:id/updates', (req, res) => {
-  const existing = db.getItemDetail(req.params.id);
+  const existing = db.getItemDetail(req.params.id, req.user);
   if (!canEdit(req.user, existing)) return res.status(403).json({ error: '你没有权限更新该事项' });
   const item = db.addUpdate(req.params.id, req.body || {}, req.user);
   item.can_edit = true;
@@ -753,15 +753,28 @@ app.post('/api/items/:id/updates', (req, res) => {
 });
 
 app.delete('/api/items/:id', (req, res) => {
-  const existing = db.getItemDetail(req.params.id);
+  const existing = db.getItemDetail(req.params.id, req.user);
   if (!canEdit(req.user, existing)) return res.status(403).json({ error: '你没有权限归档该事项' });
   res.json(db.archiveItem(req.params.id, req.user));
+});
+
+
+app.get('/api/updates/:id', (req, res) => {
+  res.json(db.getWorkUpdate(req.params.id, req.user));
+});
+
+app.patch('/api/updates/:id', (req, res) => {
+  res.json(db.updateWorkUpdate(req.params.id, req.body || {}, req.user));
+});
+
+app.delete('/api/updates/:id', (req, res) => {
+  res.json(db.deleteWorkUpdate(req.params.id, req.user));
 });
 
 app.get('/api/day', (req, res) => {
   const date = req.query.date || db.todayStr();
   if (!db.isDate(date)) throw new HttpError(400, '日期格式应为 YYYY-MM-DD');
-  res.json(db.getDay(date));
+  res.json(db.getDay(date, req.user));
 });
 
 

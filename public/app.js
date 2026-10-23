@@ -246,8 +246,13 @@ function renderDailyMembers(data) {
         <div class="update-foot">
           ${u.project ? `<span>${esc(u.project)}</span>` : ''}
           ${u.actor_name && u.actor_name !== member.name ? `<span>由 ${esc(u.actor_name)} 更新</span>` : ''}
+          ${u.editor_name && u.editor_name !== u.actor_name ? `<span>编辑人 ${esc(u.editor_name)}</span>` : ''}
           <span>${fmtTime(u.created_at)}</span>
         </div>
+        ${u.can_edit ? `<div class="update-actions">
+          <button class="btn ghost" data-edit-update="${u.id}">编辑</button>
+          <button class="btn danger ghost" data-delete-update="${u.id}">删除</button>
+        </div>` : ''}
       </div>`).join('');
 
     const silent = member.silentItems || [];
@@ -509,10 +514,125 @@ function timelineHtml(item) {
           </div>
           <div class="tl-sub">${esc(transition)} · 进度 ${u.progress}%${delta}</div>
           ${u.note ? `<p>${esc(u.note)}</p>` : ''}
-          <div class="tl-meta">${esc(u.actor_name || u.member_name)} · ${fmtDateTime(u.created_at)}</div>
+          <div class="tl-meta">${esc(u.actor_name || u.member_name)} · ${fmtDateTime(u.created_at)}${u.editor_name && u.editor_name !== u.actor_name ? ` · 编辑人 ${esc(u.editor_name)}` : ''}</div>
+          ${u.can_edit ? `<div class="tl-actions">
+            <button class="btn ghost" data-edit-update="${u.id}">编辑</button>
+            <button class="btn danger ghost" data-delete-update="${u.id}">删除</button>
+          </div>` : ''}
         </div>
       </div>`;
   }).join('');
+}
+
+
+async function openUpdateForm(updateId) {
+  try {
+    const data = await api(`/api/updates/${updateId}`);
+    if (!data.can_edit) {
+      toast('你没有权限修改该更新记录', 'error');
+      return;
+    }
+    const { update, item } = data;
+    openModal(`
+      <div class="modal-head">
+        <div class="modal-title">
+          <h2>编辑更新记录</h2>
+          <div class="sub">${esc(item.title)} · ${esc(update.actor_name || item.member_name)}</div>
+        </div>
+        <button class="icon-btn" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <form id="updateEditForm" class="form">
+          <div class="meta-grid" style="margin:0">
+            <label>日期
+              <input type="date" name="update_date" value="${esc(update.update_date)}" required />
+            </label>
+            <label>状态
+              <select name="status">${statusOptions(update.status)}</select>
+            </label>
+            <label>进度
+              <input type="number" name="progress" min="0" max="100" value="${update.progress}" required />
+            </label>
+          </div>
+          <label>更新内容
+            <textarea name="note" rows="6" placeholder="今天做了什么、遇到什么、下一步…">${esc(update.note || '')}</textarea>
+          </label>
+          <button class="btn primary" type="submit">保存更新</button>
+        </form>
+      </div>`);
+
+    $('#updateEditForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = form.querySelector('button[type="submit"]');
+      const body = Object.fromEntries(new FormData(form).entries());
+      body.progress = Number(body.progress);
+      button.disabled = true;
+      button.textContent = '保存中…';
+      try {
+        await api(`/api/updates/${updateId}`, { method: 'PATCH', body: JSON.stringify(body) });
+        toast('更新已保存');
+        closeModal();
+        await refreshAll();
+      } catch (err) {
+        toast(err.message, 'error');
+        button.disabled = false;
+        button.textContent = '保存更新';
+      }
+    });
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function openDeleteUpdateConfirm(updateId) {
+  try {
+    const data = await api(`/api/updates/${updateId}`);
+    if (!data.can_edit) {
+      toast('你没有权限删除该更新记录', 'error');
+      return;
+    }
+    const { update, item } = data;
+    openModal(`
+      <div class="modal-head">
+        <div class="modal-title">
+          <h2>删除更新记录</h2>
+          <div class="sub">${esc(item.title)} · ${esc(update.update_date)}</div>
+        </div>
+        <button class="icon-btn" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        ${update.note ? `<p class="description">${esc(update.note)}</p>` : ''}
+        <p class="muted">删除后该条履历不可恢复；如果删除的是最新记录，事项状态和进度会自动回退到上一条。</p>
+        <label class="form" style="margin-top:14px">输入「确认删除」后按钮才会启用
+          <input id="deleteConfirmInput" autocomplete="off" placeholder="确认删除" style="border:1px solid var(--line);border-radius:10px;padding:9px 10px;font:inherit" />
+        </label>
+        <div style="display:flex;gap:10px;margin-top:16px">
+          <button class="btn danger" id="deleteConfirmBtn" disabled>删除</button>
+          <button class="btn ghost" data-close>取消</button>
+        </div>
+      </div>`);
+
+    const input = $('#deleteConfirmInput');
+    const button = $('#deleteConfirmBtn');
+    input.addEventListener('input', () => {
+      button.disabled = input.value.trim() !== '确认删除';
+    });
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await api(`/api/updates/${updateId}`, { method: 'DELETE' });
+        toast('更新记录已删除');
+        closeModal();
+        await refreshAll();
+      } catch (err) {
+        toast(err.message, 'error');
+        button.disabled = input.value.trim() !== '确认删除';
+      }
+    });
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 }
 
 async function openItem(id) {
@@ -599,7 +719,6 @@ async function openItem(id) {
           toast('更新已记录');
           closeModal();
           await refreshAll();
-          await openItem(item.id);
         } catch (err) {
           toast(err.message, 'error');
           button.disabled = false;
@@ -1900,6 +2019,16 @@ function bindEvents() {
   });
 
   document.addEventListener('click', (event) => {
+    const editUpdateBtn = event.target.closest('[data-edit-update]');
+    if (editUpdateBtn) {
+      openUpdateForm(editUpdateBtn.dataset.editUpdate);
+      return;
+    }
+    const deleteUpdateBtn = event.target.closest('[data-delete-update]');
+    if (deleteUpdateBtn) {
+      openDeleteUpdateConfirm(deleteUpdateBtn.dataset.deleteUpdate);
+      return;
+    }
     const itemBtn = event.target.closest('[data-item]');
     if (itemBtn) {
       openItem(itemBtn.dataset.item);
