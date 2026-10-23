@@ -1,9 +1,11 @@
 const path = require('node:path');
+const crypto = require('node:crypto');
 const express = require('express');
 const ExcelJS = require('exceljs');
 const db = require('./db');
 const auth = require('./auth');
-const { verifyPassword } = require('./security');
+const mailer = require('./mailer');
+const { verifyPassword, hashCode } = require('./security');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3100);
@@ -266,7 +268,7 @@ async function buildWorkbook({ from, to }, memberId) {
 }
 
 function canEdit(user, item) {
-  return user.role === 'admin' || user.role === 'manager' || Number(item.member_id) === Number(user.member_id);
+  return user.role === 'admin' || user.role === 'leader' || Number(item.member_id) === Number(user.member_id);
 }
 
 function itemWithAccess(id, user) {
@@ -303,9 +305,154 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ user: auth.publicUser(user) });
 });
 
+
+const codeRequestLog = new Map();
+
+function checkCodeRateLimit(key) {
+  const now = Date.now();
+  const record = codeRequestLog.get(key) || { last: 0, windowStart: now, count: 0 };
+  if (now - record.last < 60_000) {
+    const err = new Error('请 60 秒后再获取验证码');
+    err.status = 429;
+    throw err;
+  }
+  if (now - record.windowStart > 3600_000) {
+    record.windowStart = now;
+    record.count = 0;
+  }
+  if (record.count >= 5) {
+    const err = new Error('验证码请求过于频繁，请稍后再试');
+    err.status = 429;
+    throw err;
+  }
+  record.last = now;
+  record.count += 1;
+  codeRequestLog.set(key, record);
+}
+
+function usernameFromEmail(email) {
+  let base = String(email).split('@')[0].toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 24);
+  if (base.length < 3) base = 'user';
+  let candidate = base;
+  let suffix = 2;
+  while (db.getUserByUsername(candidate)) {
+    candidate = `${base}${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+app.post('/api/auth/register/send-code', handle(async (req, res) => {
+  const email = db.normalizeEmail(req.body && req.body.email);
+  if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (db.getUserByEmail(email)) throw new HttpError(409, '该邮箱已注册或正在审核');
+  if (!mailer.isConfigured()) throw new HttpError(503, '管理员尚未配置邮件服务，暂时无法自助注册');
+
+  checkCodeRateLimit(`${req.ip}|${email}`);
+  const code = String(crypto.randomInt(100000, 1000000));
+  db.createEmailCode(email, 'register', hashCode(code), Date.now() + 10 * 60 * 1000);
+  await mailer.sendVerificationCode(email, code);
+  res.json({ ok: true, message: '验证码已发送，请检查邮箱（包括垃圾邮件）' });
+}));
+
+app.post('/api/auth/register', handle(async (req, res) => {
+  const body = req.body || {};
+  const email = db.normalizeEmail(body.email);
+  const code = String(body.code || '').trim();
+  const password = String(body.password || '');
+  const displayName = String(body.display_name || '').trim();
+
+  if (!db.isValidEmail(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (!/^\d{6}$/.test(code)) throw new HttpError(400, '验证码应为 6 位数字');
+  if (password.length < 6) throw new HttpError(400, '密码至少 6 位');
+  if (db.getUserByEmail(email)) throw new HttpError(409, '该邮箱已注册或正在审核');
+
+  const record = db.getLatestEmailCode(email, 'register');
+  if (!record) throw new HttpError(400, '请先获取验证码');
+  if (Number(record.attempts) >= 5) throw new HttpError(400, '验证码尝试次数过多，请重新获取');
+  if (Number(record.expires_at) < Date.now()) throw new HttpError(400, '验证码已过期，请重新获取');
+
+  db.incrementEmailCodeAttempts(record.id);
+  if (hashCode(code) !== record.code_hash) throw new HttpError(400, '验证码不正确');
+  db.markEmailCodeUsed(record.id);
+
+  const username = usernameFromEmail(email);
+  const user = db.createUser({
+    username,
+    email,
+    password,
+    display_name: displayName || username,
+    role: 'member',
+    status: 'pending',
+  });
+
+  res.status(201).json({
+    pending: true,
+    message: '注册成功，等待管理员审核',
+    user: { id: user.id, email: user.email, display_name: user.display_name, status: user.status },
+  });
+}));
+
 // ---------- authenticated APIs ----------
 
 app.use('/api', auth.requireAuth);
+
+
+app.get('/api/admin/mail', auth.requireAdmin, (req, res) => {
+  res.json({ config: mailer.publicConfig() });
+});
+
+app.put('/api/admin/mail', auth.requireAdmin, (req, res) => {
+  res.json({ config: mailer.saveMailConfig(req.body || {}) });
+});
+
+app.post('/api/admin/mail/test', auth.requireAdmin, handle(async (req, res) => {
+  const to = db.normalizeEmail((req.body && req.body.to) || req.user.email);
+  if (!db.isValidEmail(to)) throw new HttpError(400, '请填写有效的收件邮箱');
+  await mailer.sendTest(to);
+  res.json({ ok: true, message: `测试邮件已发送到 ${to}` });
+}));
+
+app.get('/api/admin/registrations', auth.requireAdmin, (req, res) => {
+  res.json({ users: db.listPendingUsers() });
+});
+
+app.post('/api/admin/registrations/:id/approve', auth.requireAdmin, handle(async (req, res) => {
+  const groupIds = Array.isArray(req.body && req.body.group_ids) ? req.body.group_ids : [];
+  const user = db.approveUser(req.params.id, groupIds);
+  if (user.email) {
+    mailer.sendApproved(user.email, user.display_name).catch((err) => {
+      console.error('[mail] 审核通过通知发送失败:', err.message);
+    });
+  }
+  res.json({ user });
+}));
+
+app.post('/api/admin/registrations/:id/reject', auth.requireAdmin, (req, res) => {
+  const user = db.rejectUser(req.params.id);
+  res.json({ user });
+});
+
+app.get('/api/groups', (req, res) => {
+  res.json({ groups: db.listGroups(req.user) });
+});
+
+app.post('/api/groups', auth.requireAdmin, (req, res) => {
+  res.status(201).json({ group: db.createGroup(req.body || {}) });
+});
+
+app.patch('/api/groups/:id', auth.requireAdmin, (req, res) => {
+  res.json({ group: db.updateGroup(req.params.id, req.body || {}) });
+});
+
+app.post('/api/groups/:id/members', auth.requireAdmin, (req, res) => {
+  const userIds = Array.isArray(req.body && req.body.user_ids) ? req.body.user_ids : [];
+  res.json({ group: db.addGroupMembers(req.params.id, userIds) });
+});
+
+app.delete('/api/groups/:id/members/:userId', auth.requireAdmin, (req, res) => {
+  res.json({ group: db.removeGroupMember(req.params.id, req.params.userId) });
+});
 
 app.post('/api/auth/password', (req, res) => {
   const { old_password, new_password } = req.body || {};
@@ -344,13 +491,16 @@ app.patch('/api/users/:id', auth.requireAdmin, (req, res) => {
   if (!target) return res.status(404).json({ error: '用户不存在' });
 
   if (targetId === req.user.id) {
-    if (body.active === 0) return res.status(400).json({ error: '不能停用当前登录账号' });
+    if (body.active === 0 || (body.status && body.status !== 'active')) {
+      return res.status(400).json({ error: '不能停用当前登录账号' });
+    }
     if (body.role && body.role !== 'admin') {
       return res.status(400).json({ error: '不能修改自己的管理员角色' });
     }
   }
 
-  const removingAdmin = target.role === 'admin' && ((body.role && body.role !== 'admin') || body.active === 0);
+  const removingAdmin = target.role === 'admin'
+    && ((body.role && body.role !== 'admin') || body.status === 'disabled' || body.status === 'pending' || body.active === 0);
   if (removingAdmin && db.countActiveAdmins(targetId) === 0) {
     return res.status(400).json({ error: '至少需要保留一个启用的管理员' });
   }
@@ -377,8 +527,8 @@ app.post('/api/items', (req, res) => {
 app.patch('/api/items/:id', (req, res) => {
   const existing = db.getItemDetail(req.params.id);
   if (!canEdit(req.user, existing)) return res.status(403).json({ error: '你没有权限修改该事项' });
-  if (req.body && req.body.member_id !== undefined && !auth.isManager(req.user)) {
-    return res.status(403).json({ error: '只有主管或管理员可以转移负责人' });
+  if (req.body && req.body.member_id !== undefined && !auth.isLeader(req.user)) {
+    return res.status(403).json({ error: '只有组长或管理员可以转移负责人' });
   }
   const item = db.updateItemMeta(req.params.id, req.body || {}, req.user);
   item.can_edit = true;
@@ -451,6 +601,11 @@ app.use('/api', (req, res) => {
 app.get('/login', (req, res) => {
   if (auth.getUserFromRequest(req)) return res.redirect('/');
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.get('/register', (req, res) => {
+  if (auth.getUserFromRequest(req)) return res.redirect('/');
+  res.sendFile(path.join(__dirname, 'public', 'register.html'));
 });
 
 app.use((req, res, next) => {

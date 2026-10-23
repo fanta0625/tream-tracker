@@ -123,6 +123,38 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_users_member_unique
     ON users(member_id) WHERE member_id IS NOT NULL;
 
+  CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    leader_user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS user_groups (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, group_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS email_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'register',
+    expires_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_email_codes_email ON email_codes(email, purpose);
+
   CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     member_id INTEGER NOT NULL REFERENCES members(id),
@@ -165,6 +197,12 @@ function addColumnIfMissing(table, column, definition) {
 addColumnIfMissing('items', 'created_by', 'INTEGER');
 addColumnIfMissing('items', 'updated_by', 'INTEGER');
 addColumnIfMissing('updates', 'actor_id', 'INTEGER');
+addColumnIfMissing('users', 'email', 'TEXT');
+addColumnIfMissing('users', 'status', "TEXT NOT NULL DEFAULT 'active'");
+
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email) WHERE email IS NOT NULL");
+run("UPDATE users SET role = 'leader' WHERE role = 'manager'");
+run("UPDATE users SET status = CASE WHEN active = 1 THEN 'active' ELSE 'disabled' END WHERE status IS NULL OR status = ''");
 
 function listMembers() {
   return all(`
@@ -207,22 +245,58 @@ function sanitizeUser(row) {
   return rest;
 }
 
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
+}
+
+function attachUserGroups(user) {
+  if (!user) return null;
+  user.group_ids = all('SELECT group_id FROM user_groups WHERE user_id = ? ORDER BY group_id', [user.id]).map((row) => row.group_id);
+  user.groups = all(`
+    SELECT g.id, g.name
+    FROM groups g
+    JOIN user_groups ug ON ug.group_id = g.id
+    WHERE ug.user_id = ?
+    ORDER BY g.name
+  `, [user.id]);
+  return user;
+}
+
 function getUserById(id) {
-  return get(`
+  return attachUserGroups(get(`
     SELECT u.*, m.name AS member_name
     FROM users u
     LEFT JOIN members m ON m.id = u.member_id
     WHERE u.id = ?
-  `, [Number(id)]);
+  `, [Number(id)]));
 }
 
-function getUserByUsername(username) {
-  return get(`
+function getUserByLogin(login) {
+  return attachUserGroups(get(`
     SELECT u.*, m.name AS member_name
     FROM users u
     LEFT JOIN members m ON m.id = u.member_id
-    WHERE u.username = ?
-  `, [String(username)]);
+    WHERE u.username = ? OR u.email = ?
+    LIMIT 1
+  `, [String(login || '').trim(), normalizeEmail(login)]));
+}
+
+function getUserByUsername(username) {
+  return getUserByLogin(username);
+}
+
+function getUserByEmail(email) {
+  return attachUserGroups(get(`
+    SELECT u.*, m.name AS member_name
+    FROM users u
+    LEFT JOIN members m ON m.id = u.member_id
+    WHERE u.email = ?
+    LIMIT 1
+  `, [normalizeEmail(email)]));
 }
 
 function listUsers() {
@@ -231,7 +305,17 @@ function listUsers() {
     FROM users u
     LEFT JOIN members m ON m.id = u.member_id
     ORDER BY u.id
-  `).map(sanitizeUser);
+  `).map((row) => sanitizeUser(attachUserGroups(row)));
+}
+
+function listPendingUsers() {
+  return all(`
+    SELECT u.*, m.name AS member_name
+    FROM users u
+    LEFT JOIN members m ON m.id = u.member_id
+    WHERE u.status = 'pending'
+    ORDER BY u.created_at
+  `).map((row) => sanitizeUser(attachUserGroups(row)));
 }
 
 function validateMemberLink(memberId, excludeUserId = 0) {
@@ -264,24 +348,48 @@ function createUser(body = {}) {
     err.status = 400;
     throw err;
   }
-  const role = ['admin', 'manager', 'member'].includes(body.role) ? body.role : 'member';
+  const role = ['admin', 'leader', 'member'].includes(body.role) ? body.role : 'member';
+  const status = ['pending', 'active', 'disabled', 'rejected'].includes(body.status) ? body.status : 'active';
   const memberId = body.member_id ? Number(body.member_id) : null;
-  if (role === 'member' && !memberId) {
-    const err = new Error('成员账号必须关联一个成员');
+  if (role === 'member' && status === 'active' && !memberId) {
+    const err = new Error('启用的成员账号必须关联一个成员');
     err.status = 400;
     throw err;
   }
   validateMemberLink(memberId);
+
+  const email = normalizeEmail(body.email);
+  if (email && !isValidEmail(email)) {
+    const err = new Error('邮箱格式不正确');
+    err.status = 400;
+    throw err;
+  }
+  if (email && get('SELECT id FROM users WHERE email = ?', [email])) {
+    const err = new Error('邮箱已被注册');
+    err.status = 409;
+    throw err;
+  }
+
   const displayName = String(body.display_name || '').trim() || username;
   try {
     const result = run(`
-      INSERT INTO users (username, password_hash, display_name, role, member_id, active, created_at)
-      VALUES (?, ?, ?, ?, ?, 1, ?)
-    `, [username, hashPassword(password), displayName, role, memberId, nowIso()]);
+      INSERT INTO users (username, email, password_hash, display_name, role, member_id, active, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      username,
+      email || null,
+      hashPassword(password),
+      displayName,
+      role,
+      memberId,
+      status === 'active' ? 1 : 0,
+      status,
+      nowIso(),
+    ]);
     return sanitizeUser(getUserById(Number(result.lastInsertRowid)));
   } catch (err) {
     if (String(err.message || '').includes('UNIQUE')) {
-      const conflict = new Error('用户名已存在');
+      const conflict = new Error('用户名或邮箱已存在');
       conflict.status = 409;
       throw conflict;
     }
@@ -306,8 +414,24 @@ function updateUser(id, body = {}) {
   };
 
   if (body.display_name !== undefined) add('display_name', String(body.display_name || '').trim() || current.username);
+
+  if (body.email !== undefined) {
+    const email = normalizeEmail(body.email);
+    if (email && !isValidEmail(email)) {
+      const err = new Error('邮箱格式不正确');
+      err.status = 400;
+      throw err;
+    }
+    if (email && get('SELECT id FROM users WHERE email = ? AND id != ?', [email, userId])) {
+      const err = new Error('邮箱已被其他账号使用');
+      err.status = 409;
+      throw err;
+    }
+    add('email', email || null);
+  }
+
   if (body.role !== undefined) {
-    if (!['admin', 'manager', 'member'].includes(body.role)) {
+    if (!['admin', 'leader', 'member'].includes(body.role)) {
       const err = new Error('角色不合法');
       err.status = 400;
       throw err;
@@ -320,17 +444,29 @@ function updateUser(id, body = {}) {
     add('member_id', memberId);
   }
 
+  let nextStatus = body.status;
+  if (nextStatus === undefined && body.active !== undefined) nextStatus = body.active ? 'active' : 'disabled';
+  if (nextStatus !== undefined) {
+    if (!['pending', 'active', 'disabled', 'rejected'].includes(nextStatus)) {
+      const err = new Error('账号状态不合法');
+      err.status = 400;
+      throw err;
+    }
+    add('status', nextStatus);
+    add('active', nextStatus === 'active' ? 1 : 0);
+  }
+
   const effectiveRole = body.role !== undefined ? body.role : current.role;
+  const effectiveStatus = nextStatus !== undefined ? nextStatus : current.status;
   const effectiveMemberId = body.member_id !== undefined
     ? (body.member_id ? Number(body.member_id) : null)
     : current.member_id;
-  if (effectiveRole === 'member' && !effectiveMemberId) {
-    const err = new Error('成员账号必须关联一个成员');
+  if (effectiveStatus === 'active' && effectiveRole === 'member' && !effectiveMemberId) {
+    const err = new Error('启用的成员账号必须关联一个成员，请使用审核通过或先关联成员');
     err.status = 400;
     throw err;
   }
 
-  if (body.active !== undefined) add('active', body.active ? 1 : 0);
   if (body.password !== undefined) {
     const password = String(body.password || '');
     if (password.length < 6) {
@@ -346,13 +482,308 @@ function updateUser(id, body = {}) {
   return sanitizeUser(getUserById(userId));
 }
 
+function ensureMemberForUser(user) {
+  if (user.member_id) return Number(user.member_id);
+  const base = String(user.display_name || user.username || '成员').trim() || '成员';
+  let name = base;
+  let suffix = 2;
+  while (get('SELECT id FROM members WHERE name = ?', [name])) {
+    name = `${base} ${suffix}`;
+    suffix += 1;
+  }
+  const result = run('INSERT INTO members (name, role, created_at) VALUES (?, ?, ?)', [name, '', nowIso()]);
+  const memberId = Number(result.lastInsertRowid);
+  run('UPDATE users SET member_id = ? WHERE id = ?', [memberId, user.id]);
+  return memberId;
+}
+
+function approveUser(id, groupIds = []) {
+  const userId = Number(id);
+  const user = getUserById(userId);
+  if (!user) {
+    const err = new Error('用户不存在');
+    err.status = 404;
+    throw err;
+  }
+  if (user.status !== 'pending') {
+    const err = new Error('该账号不在待审核状态');
+    err.status = 400;
+    throw err;
+  }
+
+  tx(() => {
+    ensureMemberForUser(user);
+    run("UPDATE users SET status = 'active', active = 1 WHERE id = ?", [userId]);
+    if (Array.isArray(groupIds) && groupIds.length) {
+      setUserGroups(userId, groupIds);
+    }
+  });
+
+  return sanitizeUser(getUserById(userId));
+}
+
+function rejectUser(id) {
+  const userId = Number(id);
+  const user = getUserById(userId);
+  if (!user) {
+    const err = new Error('用户不存在');
+    err.status = 404;
+    throw err;
+  }
+  run("UPDATE users SET status = 'rejected', active = 0 WHERE id = ?", [userId]);
+  return sanitizeUser(getUserById(userId));
+}
+
+function groupMembers(groupId) {
+  return all(`
+    SELECT u.id, u.username, u.email, u.display_name, u.role, u.status, u.member_id
+    FROM users u
+    JOIN user_groups ug ON ug.user_id = u.id
+    WHERE ug.group_id = ?
+    ORDER BY u.display_name, u.id
+  `, [Number(groupId)]);
+}
+
+function getGroup(id) {
+  const group = get(`
+    SELECT g.*, u.display_name AS leader_name,
+      (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id) AS member_count
+    FROM groups g
+    LEFT JOIN users u ON u.id = g.leader_user_id
+    WHERE g.id = ?
+  `, [Number(id)]);
+  if (!group) return null;
+  group.member_count = Number(group.member_count);
+  group.members = groupMembers(group.id);
+  return group;
+}
+
+function listGroups(user = null) {
+  let sql = `
+    SELECT g.*, u.display_name AS leader_name,
+      (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id) AS member_count
+    FROM groups g
+    LEFT JOIN users u ON u.id = g.leader_user_id
+  `;
+  const params = [];
+  if (user && user.role !== 'admin') {
+    sql += `
+      WHERE g.leader_user_id = ?
+         OR EXISTS (SELECT 1 FROM user_groups ug WHERE ug.group_id = g.id AND ug.user_id = ?)
+    `;
+    params.push(user.id, user.id);
+  }
+  sql += ' ORDER BY g.id';
+  return all(sql, params).map((group) => ({
+    ...group,
+    member_count: Number(group.member_count),
+    members: groupMembers(group.id),
+  }));
+}
+
+function createGroup(body = {}) {
+  const name = String(body.name || '').trim();
+  if (!name) {
+    const err = new Error('组名不能为空');
+    err.status = 400;
+    throw err;
+  }
+  const leaderId = body.leader_user_id ? Number(body.leader_user_id) : null;
+  if (leaderId) {
+    const leader = getUserById(leaderId);
+    if (!leader || leader.status !== 'active') {
+      const err = new Error('组长必须是启用状态的用户');
+      err.status = 400;
+      throw err;
+    }
+  }
+  try {
+    const result = run('INSERT INTO groups (name, leader_user_id, created_at) VALUES (?, ?, ?)', [name, leaderId, nowIso()]);
+    const groupId = Number(result.lastInsertRowid);
+    if (leaderId) run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [leaderId, groupId]);
+    return getGroup(groupId);
+  } catch (err) {
+    if (String(err.message || '').includes('UNIQUE')) {
+      const conflict = new Error('组名已存在');
+      conflict.status = 409;
+      throw conflict;
+    }
+    throw err;
+  }
+}
+
+function updateGroup(id, body = {}) {
+  const groupId = Number(id);
+  const group = getGroup(groupId);
+  if (!group) {
+    const err = new Error('组不存在');
+    err.status = 404;
+    throw err;
+  }
+  const fields = [];
+  const params = [];
+  if (body.name !== undefined) {
+    const name = String(body.name || '').trim();
+    if (!name) {
+      const err = new Error('组名不能为空');
+      err.status = 400;
+      throw err;
+    }
+    fields.push('name = ?');
+    params.push(name);
+  }
+  if (body.leader_user_id !== undefined) {
+    const leaderId = body.leader_user_id ? Number(body.leader_user_id) : null;
+    if (leaderId) {
+      const leader = getUserById(leaderId);
+      if (!leader || leader.status !== 'active') {
+        const err = new Error('组长必须是启用状态的用户');
+        err.status = 400;
+        throw err;
+      }
+    }
+    fields.push('leader_user_id = ?');
+    params.push(leaderId);
+  }
+  if (!fields.length) return group;
+  params.push(groupId);
+  try {
+    run(`UPDATE groups SET ${fields.join(', ')} WHERE id = ?`, params);
+  } catch (err) {
+    if (String(err.message || '').includes('UNIQUE')) {
+      const conflict = new Error('组名已存在');
+      conflict.status = 409;
+      throw conflict;
+    }
+    throw err;
+  }
+  if (body.leader_user_id) {
+    run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [Number(body.leader_user_id), groupId]);
+  }
+  return getGroup(groupId);
+}
+
+function addGroupMembers(id, userIds = []) {
+  const groupId = Number(id);
+  if (!getGroup(groupId)) {
+    const err = new Error('组不存在');
+    err.status = 404;
+    throw err;
+  }
+  for (const raw of userIds) {
+    const userId = Number(raw);
+    const user = getUserById(userId);
+    if (!user) continue;
+    if (user.status !== 'active') {
+      const err = new Error(`用户「${user.display_name || user.username}」不是启用状态`);
+      err.status = 400;
+      throw err;
+    }
+    run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [userId, groupId]);
+  }
+  return getGroup(groupId);
+}
+
+function removeGroupMember(id, userId) {
+  const groupId = Number(id);
+  const targetUserId = Number(userId);
+  const group = getGroup(groupId);
+  if (!group) {
+    const err = new Error('组不存在');
+    err.status = 404;
+    throw err;
+  }
+  run('DELETE FROM user_groups WHERE group_id = ? AND user_id = ?', [groupId, targetUserId]);
+  if (Number(group.leader_user_id) === targetUserId) {
+    run('UPDATE groups SET leader_user_id = NULL WHERE id = ?', [groupId]);
+  }
+  return getGroup(groupId);
+}
+
+function setUserGroups(userId, groupIds = []) {
+  const id = Number(userId);
+  const user = getUserById(id);
+  if (!user) {
+    const err = new Error('用户不存在');
+    err.status = 404;
+    throw err;
+  }
+  const unique = [...new Set((groupIds || []).map(Number).filter(Boolean))];
+  for (const groupId of unique) {
+    if (!getGroup(groupId)) {
+      const err = new Error('组不存在');
+      err.status = 400;
+      throw err;
+    }
+  }
+  run('DELETE FROM user_groups WHERE user_id = ?', [id]);
+  for (const groupId of unique) {
+    run('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [id, groupId]);
+  }
+  return sanitizeUser(getUserById(id));
+}
+
+function isGroupMember(userId, groupId) {
+  return !!get('SELECT 1 AS ok FROM user_groups WHERE user_id = ? AND group_id = ?', [Number(userId), Number(groupId)]);
+}
+
+function isGroupLeader(userId, groupId) {
+  return !!get('SELECT 1 AS ok FROM groups WHERE id = ? AND leader_user_id = ?', [Number(groupId), Number(userId)]);
+}
+
+function groupIdsForUser(userId) {
+  return all('SELECT group_id FROM user_groups WHERE user_id = ?', [Number(userId)]).map((row) => row.group_id);
+}
+
 function touchLogin(id) {
   run('UPDATE users SET last_login_at = ? WHERE id = ?', [nowIso(), Number(id)]);
 }
 
 function countActiveAdmins(excludeUserId = 0) {
-  const row = get("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1 AND id != ?", [Number(excludeUserId)]);
+  const row = get("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND status = 'active' AND id != ?", [Number(excludeUserId)]);
   return Number(row.c);
+}
+
+function getSetting(key, fallback = '') {
+  const row = get('SELECT value FROM settings WHERE key = ?', [String(key)]);
+  return row ? row.value : fallback;
+}
+
+function setSetting(key, value) {
+  run(`
+    INSERT INTO settings (key, value, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `, [String(key), String(value ?? ''), nowIso()]);
+}
+
+function getSettingsByPrefix(prefix) {
+  return all('SELECT key, value FROM settings WHERE key LIKE ?', [`${String(prefix)}%`]);
+}
+
+function createEmailCode(email, purpose, codeHash, expiresAt) {
+  const normalized = normalizeEmail(email);
+  run('DELETE FROM email_codes WHERE email = ? AND purpose = ? AND used_at IS NULL', [normalized, String(purpose)]);
+  run(`
+    INSERT INTO email_codes (email, code_hash, purpose, expires_at, attempts, created_at)
+    VALUES (?, ?, ?, ?, 0, ?)
+  `, [normalized, String(codeHash), String(purpose), Number(expiresAt), nowIso()]);
+}
+
+function getLatestEmailCode(email, purpose) {
+  return get(`
+    SELECT * FROM email_codes
+    WHERE email = ? AND purpose = ? AND used_at IS NULL
+    ORDER BY id DESC LIMIT 1
+  `, [normalizeEmail(email), String(purpose)]);
+}
+
+function incrementEmailCodeAttempts(id) {
+  run('UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?', [Number(id)]);
+}
+
+function markEmailCodeUsed(id) {
+  run('UPDATE email_codes SET used_at = ? WHERE id = ?', [nowIso(), Number(id)]);
 }
 
 function listItems(filters = {}) {
@@ -937,12 +1368,36 @@ module.exports = {
   listMembers,
   createMember,
   getUserById,
+  getUserByLogin,
   getUserByUsername,
+  getUserByEmail,
   listUsers,
+  listPendingUsers,
   createUser,
   updateUser,
+  approveUser,
+  rejectUser,
   touchLogin,
   countActiveAdmins,
+  normalizeEmail,
+  isValidEmail,
+  listGroups,
+  getGroup,
+  createGroup,
+  updateGroup,
+  addGroupMembers,
+  removeGroupMember,
+  setUserGroups,
+  isGroupMember,
+  isGroupLeader,
+  groupIdsForUser,
+  getSetting,
+  setSetting,
+  getSettingsByPrefix,
+  createEmailCode,
+  getLatestEmailCode,
+  incrementEmailCodeAttempts,
+  markEmailCodeUsed,
   listItems,
   getItemDetail,
   createItem,

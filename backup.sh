@@ -14,5 +14,9 @@ db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
 db.close();
 NODE
 chmod 600 "$TARGET"
-find backups -name 'tracker-*.db' -type f -mtime +14 -delete
+if [ -f data/session.secret ]; then
+  cp data/session.secret "backups/session-secret-${STAMP}"
+  chmod 600 "backups/session-secret-${STAMP}"
+fi
+find backups \( -name 'tracker-*.db' -o -name 'session-secret-*' \) -type f -mtime +14 -delete
 echo "backup: $TARGET"

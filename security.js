@@ -39,6 +39,36 @@ function verifyPassword(password, stored) {
   }
 }
 
+
+function secretKey(context = 'default') {
+  return crypto.createHash('sha256').update(`${SECRET}:${context}`).digest();
+}
+
+function encryptText(plain) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', secretKey('secret-box'), iv);
+  const encrypted = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `v1.${iv.toString('base64url')}.${tag.toString('base64url')}.${encrypted.toString('base64url')}`;
+}
+
+function decryptText(payload) {
+  try {
+    const [version, ivPart, tagPart, dataPart] = String(payload || '').split('.');
+    if (version !== 'v1' || !ivPart || !tagPart || !dataPart) return '';
+    const decipher = crypto.createDecipheriv('aes-256-gcm', secretKey('secret-box'), Buffer.from(ivPart, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+    const decrypted = Buffer.concat([decipher.update(Buffer.from(dataPart, 'base64url')), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function hashCode(code) {
+  return crypto.createHmac('sha256', SECRET).update(String(code)).digest('hex');
+}
+
 function signSession(userId, days = 7) {
   const payload = { uid: Number(userId), exp: Date.now() + days * 86400000 };
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -83,6 +113,9 @@ function parseCookies(header) {
 module.exports = {
   hashPassword,
   verifyPassword,
+  encryptText,
+  decryptText,
+  hashCode,
   signSession,
   verifySession,
   parseCookies,

@@ -19,9 +19,11 @@
       <button class="nav-btn active" data-view="daily">日报</button>
       <button class="nav-btn" data-view="items">事项</button>
       <button class="nav-btn" data-view="summary">汇总</button>
+      <button class="nav-btn" data-view="groups">分组</button>
       <button class="nav-btn" data-view="members">成员</button>
     </nav>
     <div class="top-actions">
+      <button class="btn ghost" id="mailBtn" hidden>邮件设置</button>
       <button class="btn ghost" id="usersBtn" hidden>用户管理</button>
       <div class="user-area">
         <span class="user-chip"><strong id="userName"></strong><span id="userRole" class="role-pill"></span></span>
@@ -87,6 +89,14 @@
       <div class="summary-grid" id="summaryPageCards"></div>
       <div class="member-grid" id="summaryMembers"></div>
       <div id="summaryDays" class="panel pad" style="margin-top:16px"></div>
+    </section>
+
+    <section id="groupsView" hidden>
+      <div class="toolbar wrap">
+        <div class="toolbar-spacer"></div>
+        <button class="btn primary" id="newGroupBtn" hidden>+ 新建组</button>
+      </div>
+      <div class="member-grid" id="groupsList"></div>
     </section>
 
     <section id="membersView" hidden>

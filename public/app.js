@@ -450,6 +450,7 @@ function switchView(view) {
   $('#dailyView').hidden = view !== 'daily';
   $('#itemsView').hidden = view !== 'items';
   $('#summaryView').hidden = view !== 'summary';
+  $('#groupsView').hidden = view !== 'groups';
   $('#membersView').hidden = view !== 'members';
 }
 
@@ -458,6 +459,7 @@ async function setView(view) {
   if (view === 'daily') await loadDaily();
   if (view === 'items') await loadItems();
   if (view === 'summary') await loadSummary();
+  if (view === 'groups') await loadGroups();
   if (view === 'members') await loadMembersView();
 }
 
@@ -565,7 +567,7 @@ async function openItem(id) {
         </aside>` : `
         <aside class="update-panel read-only">
           <h3 class="section-title">只读</h3>
-          <p class="muted">只有事项负责人、主管或管理员可以更新该事项。</p>
+          <p class="muted">只有事项负责人、组长或管理员可以更新该事项。</p>
         </aside>`}
       </div>`;
 
@@ -622,7 +624,7 @@ async function openItem(id) {
 
 
 function openEditItem(item) {
-  const canTransfer = state.user.role === 'admin' || state.user.role === 'manager';
+  const canTransfer = state.user.role === 'admin' || state.user.role === 'leader';
   const ownerField = canTransfer
     ? `<label>负责人
          <select name="member_id">${state.members.map((member) => `<option value="${member.id}" ${Number(member.id) === Number(item.member_id) ? 'selected' : ''}>${esc(member.name)}${member.role ? ` · ${esc(member.role)}` : ''}</option>`).join('')}</select>
@@ -830,7 +832,7 @@ function openExportRange() {
 
 
 function roleLabel(role) {
-  return { admin: '管理员', manager: '主管', member: '成员' }[role] || role;
+  return { admin: '管理员', leader: '组长', member: '成员' }[role] || role;
 }
 
 function applyUser() {
@@ -840,51 +842,92 @@ function applyUser() {
   role.textContent = roleLabel(state.user.role);
   role.className = `role-pill ${state.user.role}`;
   $('#usersBtn').hidden = state.user.role !== 'admin';
+  $('#mailBtn').hidden = state.user.role !== 'admin';
+  $('#newGroupBtn').hidden = state.user.role !== 'admin';
   $('#memberForm').hidden = state.user.role !== 'admin';
+}
+
+function userStatusLabel(status) {
+  return { pending: '待审核', active: '启用', disabled: '停用', rejected: '已拒绝' }[status] || status;
 }
 
 async function openUsers() {
   try {
-    const [{ users }, { members }] = await Promise.all([api('/api/users'), api('/api/members')]);
+    const [{ users }, { members }, { users: pending }, { groups }] = await Promise.all([
+      api('/api/users'),
+      api('/api/members'),
+      api('/api/admin/registrations'),
+      api('/api/groups'),
+    ]);
     const linked = new Set(users.map((u) => u.member_id).filter(Boolean));
     const available = members.filter((m) => !linked.has(m.id));
     const memberOptionsForUser = available
       .map((m) => `<option value="${m.id}">${esc(m.name)}${m.role ? ` · ${esc(m.role)}` : ''}</option>`)
       .join('');
+    const groupNames = new Map(groups.map((g) => [g.id, g.name]));
 
-    const rows = users.map((u) => `
-      <tr>
-        <td><strong>${esc(u.username)}</strong><br><span class="muted">${esc(u.display_name)}</span></td>
-        <td>
-          <select data-user-member="${u.id}">
-            <option value="">不关联</option>
-            ${members.filter((m) => Number(m.id) === Number(u.member_id) || !linked.has(m.id)).map((m) => `<option value="${m.id}" ${Number(m.id) === Number(u.member_id) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
-          </select>
-        </td>
-        <td>
-          <select data-user-role="${u.id}">
-            ${['admin', 'manager', 'member'].map((role) => `<option value="${role}" ${u.role === role ? 'selected' : ''}>${roleLabel(role)}</option>`).join('')}
-          </select>
-        </td>
-        <td><span class="status-dot ${u.active ? '' : 'off'}"></span>${u.active ? '启用' : '停用'}</td>
-        <td class="actions">
-          <button class="btn ghost" data-user-reset="${u.id}">重置密码</button>
-          <button class="btn ghost" data-user-toggle="${u.id}" data-active="${u.active}">${u.active ? '停用' : '启用'}</button>
-        </td>
-      </tr>`).join('');
+    const rows = users.map((u) => {
+      const status = u.status || (u.active ? 'active' : 'disabled');
+      const groupsText = (u.groups || []).map((g) => g.name).join('、') || '-';
+      const canToggle = status === 'active' || status === 'disabled';
+      return `
+        <tr>
+          <td>
+            <strong>${esc(u.username)}</strong><br><span class="muted">${esc(u.display_name)}</span>
+            <div style="margin-top:4px">
+              <select data-user-member="${u.id}">
+                <option value="">不关联成员</option>
+                ${members.filter((m) => Number(m.id) === Number(u.member_id) || !linked.has(m.id)).map((m) => `<option value="${m.id}" ${Number(m.id) === Number(u.member_id) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
+              </select>
+            </div>
+          </td>
+          <td>${esc(u.email || '-')}</td>
+          <td>
+            <select data-user-role="${u.id}">
+              ${['admin', 'leader', 'member'].map((role) => `<option value="${role}" ${u.role === role ? 'selected' : ''}>${roleLabel(role)}</option>`).join('')}
+            </select>
+          </td>
+          <td><span class="status-dot ${status === 'active' ? '' : 'off'}"></span>${userStatusLabel(status)}</td>
+          <td>${esc(groupsText)}</td>
+          <td class="actions">
+            ${canToggle ? `<button class="btn ghost" data-user-toggle="${u.id}" data-status="${status}">${status === 'active' ? '停用' : '启用'}</button>` : ''}
+            <button class="btn ghost" data-user-reset="${u.id}">重置密码</button>
+          </td>
+        </tr>`;
+    }).join('');
+
+    const pendingHtml = pending.length ? `
+      <div class="pending-box">
+        <div class="section-title" style="margin-top:0">待审核注册 · ${pending.length}</div>
+        ${pending.map((u) => `
+          <div class="pending-row">
+            <div>
+              <strong>${esc(u.display_name)}</strong>
+              <span class="muted">${esc(u.email || u.username)} · ${fmtDateTime(u.created_at)}</span>
+            </div>
+            <div class="pending-actions">
+              <button class="btn primary" data-approve-user="${u.id}">通过</button>
+              <button class="btn danger ghost" data-reject-user="${u.id}">拒绝</button>
+            </div>
+          </div>`).join('')}
+      </div>` : '';
 
     openModal(`
       <div class="modal-head">
         <div class="modal-title">
           <h2>用户管理</h2>
-          <div class="sub">为团队成员创建账号，并关联到对应成员</div>
+          <div class="sub">审核注册、创建账号、分配角色；分组请到「分组」页操作</div>
         </div>
         <button class="icon-btn" data-close aria-label="关闭">×</button>
       </div>
       <div class="modal-body">
+        ${pendingHtml}
         <form class="user-create" id="createUserForm">
           <label>用户名
             <input name="username" placeholder="如 zhangsan" required />
+          </label>
+          <label>邮箱
+            <input name="email" type="email" placeholder="可选，用于登录" />
           </label>
           <label>显示名
             <input name="display_name" placeholder="张三" />
@@ -894,8 +937,8 @@ async function openUsers() {
           </label>
           <label>角色
             <select name="role">
-              <option value="member">成员</option>
-              <option value="manager">主管</option>
+              <option value="member">组员</option>
+              <option value="leader">组长</option>
               <option value="admin">管理员</option>
             </select>
           </label>
@@ -912,11 +955,12 @@ async function openUsers() {
         <div class="table-wrap">
           <table class="table user-table">
             <thead>
-              <tr><th>账号</th><th>关联成员</th><th>角色</th><th>状态</th><th></th></tr>
+              <tr><th>账号</th><th>邮箱</th><th>角色</th><th>状态</th><th>组</th><th></th></tr>
             </thead>
-            <tbody>${rows || '<tr><td colspan="5" class="empty-state">暂无用户</td></tr>'}</tbody>
+            <tbody>${rows || '<tr><td colspan="6" class="empty-state">暂无用户</td></tr>'}</tbody>
           </table>
         </div>
+        <p class="muted" style="margin:12px 0 0;font-size:12px">分组和组长设置请到「分组」页；组长可以创建项目。</p>
       </div>`);
 
     $('#createUserForm').addEventListener('submit', async (event) => {
@@ -926,6 +970,7 @@ async function openUsers() {
       const data = Object.fromEntries(new FormData(form).entries());
       if (data.member_id) data.member_id = Number(data.member_id);
       else delete data.member_id;
+      if (!data.email) delete data.email;
       button.disabled = true;
       button.textContent = '创建中…';
       try {
@@ -938,6 +983,32 @@ async function openUsers() {
         button.textContent = '创建账号';
       }
     });
+
+    $$('[data-approve-user]').forEach((button) => button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await api(`/api/admin/registrations/${button.dataset.approveUser}/approve`, {
+          method: 'POST',
+          body: JSON.stringify({ group_ids: [] }),
+        });
+        toast('已通过审核');
+        await openUsers();
+      } catch (err) {
+        toast(err.message, 'error');
+        button.disabled = false;
+      }
+    }));
+
+    $$('[data-reject-user]').forEach((button) => button.addEventListener('click', async () => {
+      if (!confirm('确定拒绝这条注册申请？')) return;
+      try {
+        await api(`/api/admin/registrations/${button.dataset.rejectUser}/reject`, { method: 'POST' });
+        toast('已拒绝');
+        await openUsers();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    }));
 
     $$('[data-user-reset]').forEach((button) => button.addEventListener('click', async () => {
       const password = prompt('输入新密码（至少 6 位）');
@@ -954,12 +1025,13 @@ async function openUsers() {
     }));
 
     $$('[data-user-toggle]').forEach((button) => button.addEventListener('click', async () => {
+      const nextStatus = button.dataset.status === 'active' ? 'disabled' : 'active';
       try {
         await api(`/api/users/${button.dataset.userToggle}`, {
           method: 'PATCH',
-          body: JSON.stringify({ active: button.dataset.active === '1' ? 0 : 1 }),
+          body: JSON.stringify({ status: nextStatus }),
         });
-        toast(button.dataset.active === '1' ? '账号已停用' : '账号已启用');
+        toast(nextStatus === 'active' ? '账号已启用' : '账号已停用');
         await openUsers();
       } catch (err) {
         toast(err.message, 'error');
@@ -996,6 +1068,225 @@ async function openUsers() {
   } catch (err) {
     toast(err.message, 'error');
   }
+}
+
+
+async function loadGroups() {
+  $('#groupsList').innerHTML = '<div class="empty-state">加载中…</div>';
+  try {
+    const { groups } = await api('/api/groups');
+    const users = state.user.role === 'admin' ? (await api('/api/users')).users : [];
+    state.groups = groups;
+    state.groupUsers = users;
+    renderGroups(groups, users);
+  } catch (err) {
+    $('#groupsList').innerHTML = `<div class="empty-state">${esc(err.message)}</div>`;
+  }
+}
+
+function renderGroups(groups, users) {
+  const isAdmin = state.user.role === 'admin';
+  $('#groupsList').innerHTML = groups.length ? groups.map((group) => {
+    const memberIds = new Set(group.members.map((m) => m.id));
+    const candidates = users.filter((u) => u.status === 'active' && !memberIds.has(u.id));
+    return `
+      <article class="member-card group-card">
+        <div class="member-head">
+          <div class="avatar" style="${avatarStyle(group.name)}">组</div>
+          <div>
+            <h3>${esc(group.name)}</h3>
+            <div class="member-meta">${group.member_count} 人${group.leader_name ? ` · 组长 ${esc(group.leader_name)}` : ' · 未指定组长'}</div>
+          </div>
+        </div>
+        <div class="chips">
+          ${group.members.length ? group.members.map((member) => `
+            <span class="chip">
+              ${esc(member.display_name || member.username)}${Number(member.id) === Number(group.leader_user_id) ? ' ★' : ''}
+              ${isAdmin ? `<button class="chip-x" data-group-remove="${group.id}" data-user-id="${member.id}" title="移出组">×</button>` : ''}
+            </span>`).join('') : '<span class="muted">暂无成员</span>'}
+        </div>
+        ${isAdmin ? `
+          <div class="group-controls">
+            <label>组长
+              <select data-group-leader="${group.id}">
+                <option value="">未指定</option>
+                ${users.filter((u) => u.status === 'active').map((u) => `<option value="${u.id}" ${Number(u.id) === Number(group.leader_user_id) ? 'selected' : ''}>${esc(u.display_name || u.username)}</option>`).join('')}
+              </select>
+            </label>
+            <label>添加成员
+              <select data-group-add="${group.id}">
+                <option value="">选择成员</option>
+                ${candidates.map((u) => `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`).join('')}
+              </select>
+            </label>
+            <button class="btn ghost" data-group-rename="${group.id}">重命名</button>
+          </div>` : ''}
+      </article>`;
+  }).join('') : '<div class="panel empty-state" style="grid-column:1/-1">还没有分组。管理员可以新建组、指定组长并添加成员。</div>';
+}
+
+async function openNewGroup() {
+  try {
+    const { users } = await api('/api/users');
+    const active = users.filter((u) => u.status === 'active');
+    openModal(`
+      <div class="modal-head">
+        <div class="modal-title">
+          <h2>新建组</h2>
+          <div class="sub">一个用户可以属于多个组，一个用户可以担任多个组的组长</div>
+        </div>
+        <button class="icon-btn" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <form id="newGroupForm" class="form">
+          <label>组名
+            <input name="name" placeholder="例如：后端组" required />
+          </label>
+          <label>组长
+            <select name="leader_user_id">
+              <option value="">暂不指定</option>
+              ${active.map((u) => `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`).join('')}
+            </select>
+          </label>
+          <button class="btn primary" type="submit">创建</button>
+        </form>
+      </div>`);
+    $('#newGroupForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = Object.fromEntries(new FormData(form).entries());
+      if (data.leader_user_id) data.leader_user_id = Number(data.leader_user_id);
+      else delete data.leader_user_id;
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      button.textContent = '创建中…';
+      try {
+        await api('/api/groups', { method: 'POST', body: JSON.stringify(data) });
+        toast('组已创建');
+        closeModal();
+        await loadGroups();
+      } catch (err) {
+        toast(err.message, 'error');
+        button.disabled = false;
+        button.textContent = '创建';
+      }
+    });
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function openMailSettings() {
+  api('/api/admin/mail').then(({ config }) => {
+    const presets = {
+      qq: { label: 'QQ 邮箱', host: 'smtp.qq.com', port: 465, secure: 'ssl', hint: '密码填 QQ 邮箱授权码，不是登录密码' },
+      '163': { label: '163 邮箱', host: 'smtp.163.com', port: 465, secure: 'ssl', hint: '密码填 163 邮箱授权码' },
+      gmail: { label: 'Gmail', host: 'smtp.gmail.com', port: 465, secure: 'ssl', hint: '密码填 Google 应用专用密码' },
+      custom: { label: '企业邮箱 / 自定义', host: config.host || '', port: config.port || 465, secure: config.secure || 'ssl', hint: '按企业邮箱管理员提供的 SMTP 信息填写' },
+    };
+    const presetKey = Object.entries(presets).find(([, p]) => p.host && p.host === config.host)?.[0] || 'custom';
+
+    openModal(`
+      <div class="modal-head">
+        <div class="modal-title">
+          <h2>邮件设置</h2>
+          <div class="sub">用于注册验证码和审核通知；密码加密保存，不会回传明文</div>
+        </div>
+        <button class="icon-btn" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <form id="mailForm" class="form">
+          <label>邮箱类型
+            <select id="mailPreset">
+              ${Object.entries(presets).map(([key, p]) => `<option value="${key}" ${key === presetKey ? 'selected' : ''}>${p.label}</option>`).join('')}
+            </select>
+          </label>
+          <p class="muted" id="mailHint" style="margin:0;font-size:12px">${presets[presetKey].hint}</p>
+          <div class="mail-grid">
+            <label>SMTP Host
+              <input name="host" value="${esc(config.host)}" placeholder="smtp.qq.com" required />
+            </label>
+            <label>端口
+              <input name="port" type="number" value="${config.port || 465}" required />
+            </label>
+            <label>加密方式
+              <select name="secure">
+                <option value="ssl" ${config.secure === 'ssl' ? 'selected' : ''}>SSL（通常 465）</option>
+                <option value="starttls" ${config.secure === 'starttls' ? 'selected' : ''}>STARTTLS（通常 587）</option>
+                <option value="none" ${config.secure === 'none' ? 'selected' : ''}>不加密</option>
+              </select>
+            </label>
+            <label>SMTP 账号
+              <input name="user" value="${esc(config.user)}" placeholder="登录账号 / 完整邮箱" />
+            </label>
+            <label>密码 / 授权码
+              <input name="password" type="password" placeholder="${config.hasPassword ? '已配置，留空不修改' : '请输入授权码'}" />
+            </label>
+            <label>发件人名称
+              <input name="from_name" value="${esc(config.fromName)}" />
+            </label>
+            <label>发件邮箱
+              <input name="from_email" type="email" value="${esc(config.fromEmail)}" placeholder="noreply@example.com" required />
+            </label>
+          </div>
+          <label class="checkbox-line"><input type="checkbox" name="clear_password" /> 清除已保存的密码</label>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn primary" type="submit">保存配置</button>
+            <button class="btn ghost" type="button" id="mailTestBtn">发送测试邮件</button>
+            <input id="mailTestTo" type="email" value="${esc(state.user.email || config.fromEmail)}" placeholder="测试收件邮箱" style="flex:1;min-width:200px;border:1px solid var(--line);border-radius:10px;padding:8px 10px" />
+          </div>
+          <p class="muted" style="margin:0;font-size:12px">当前来源：${config.source === 'env' ? '环境变量（保存后将使用数据库配置）' : '数据库配置'}${config.hasPassword ? ' · 已保存密码' : ' · 未保存密码'}</p>
+        </form>
+      </div>`);
+
+    const presetSelect = $('#mailPreset');
+    presetSelect.addEventListener('change', () => {
+      const preset = presets[presetSelect.value];
+      $('#mailHint').textContent = preset.hint;
+      if (preset.host) {
+        $('input[name="host"]').value = preset.host;
+        $('input[name="port"]').value = preset.port;
+        $('select[name="secure"]').value = preset.secure;
+      }
+    });
+
+    $('#mailForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = Object.fromEntries(new FormData(form).entries());
+      data.port = Number(data.port);
+      data.clear_password = Boolean(data.clear_password);
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      button.textContent = '保存中…';
+      try {
+        await api('/api/admin/mail', { method: 'PUT', body: JSON.stringify(data) });
+        toast('邮件配置已保存');
+        closeModal();
+      } catch (err) {
+        toast(err.message, 'error');
+        button.disabled = false;
+        button.textContent = '保存配置';
+      }
+    });
+
+    $('#mailTestBtn').addEventListener('click', async () => {
+      const to = $('#mailTestTo').value.trim();
+      if (!to) return toast('请填写测试收件邮箱', 'error');
+      const button = $('#mailTestBtn');
+      button.disabled = true;
+      button.textContent = '发送中…';
+      try {
+        await api('/api/admin/mail/test', { method: 'POST', body: JSON.stringify({ to }) });
+        toast('测试邮件已发送');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        button.disabled = false;
+        button.textContent = '发送测试邮件';
+      }
+    });
+  }).catch((err) => toast(err.message, 'error'));
 }
 
 function openChangePassword() {
@@ -1056,6 +1347,7 @@ async function refreshAll() {
   if (state.view === 'daily') await loadDaily();
   else if (state.view === 'items') await loadItems();
   else if (state.view === 'summary') await loadSummary();
+  else if (state.view === 'groups') await loadGroups();
   else await loadMembersView();
 }
 
@@ -1098,6 +1390,70 @@ function bindEvents() {
     loadSummary();
   }));
   $('#usersBtn').addEventListener('click', openUsers);
+  $('#mailBtn').addEventListener('click', openMailSettings);
+  $('#newGroupBtn').addEventListener('click', openNewGroup);
+
+  $('#groupsList').addEventListener('change', async (event) => {
+    const leaderSelect = event.target.closest('[data-group-leader]');
+    if (leaderSelect) {
+      try {
+        await api(`/api/groups/${leaderSelect.dataset.groupLeader}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ leader_user_id: leaderSelect.value ? Number(leaderSelect.value) : null }),
+        });
+        toast('组长已更新');
+        await loadGroups();
+      } catch (err) {
+        toast(err.message, 'error');
+        await loadGroups();
+      }
+      return;
+    }
+    const addSelect = event.target.closest('[data-group-add]');
+    if (addSelect && addSelect.value) {
+      try {
+        await api(`/api/groups/${addSelect.dataset.groupAdd}/members`, {
+          method: 'POST',
+          body: JSON.stringify({ user_ids: [Number(addSelect.value)] }),
+        });
+        toast('成员已加入');
+        await loadGroups();
+      } catch (err) {
+        toast(err.message, 'error');
+        await loadGroups();
+      }
+    }
+  });
+
+  $('#groupsList').addEventListener('click', async (event) => {
+    const rename = event.target.closest('[data-group-rename]');
+    if (rename) {
+      const name = prompt('新的组名');
+      if (!name) return;
+      try {
+        await api(`/api/groups/${rename.dataset.groupRename}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ name }),
+        });
+        toast('组名已更新');
+        await loadGroups();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+      return;
+    }
+    const remove = event.target.closest('[data-group-remove]');
+    if (remove) {
+      if (!confirm('确定把该成员移出组？')) return;
+      try {
+        await api(`/api/groups/${remove.dataset.groupRemove}/members/${remove.dataset.userId}`, { method: 'DELETE' });
+        toast('成员已移出');
+        await loadGroups();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    }
+  });
   $('#changePasswordBtn').addEventListener('click', openChangePassword);
   $('#logoutBtn').addEventListener('click', async () => {
     try {

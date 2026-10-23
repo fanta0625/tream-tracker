@@ -19,7 +19,7 @@ function getUserFromRequest(req) {
   const payload = verifySession(cookies[COOKIE_NAME]);
   if (!payload) return null;
   const user = db.getUserById(payload.uid);
-  if (!user || !Number(user.active)) return null;
+  if (!user || user.status !== 'active') return null;
   return user;
 }
 
@@ -56,8 +56,23 @@ function login(username, password, ip) {
     throw err;
   }
 
-  const user = db.getUserByUsername(cleanUsername);
-  const valid = user && Number(user.active) && verifyPassword(password, user.password_hash);
+  const user = db.getUserByLogin(cleanUsername);
+  if (user && user.status === 'pending') {
+    const err = new Error('账号等待管理员审核');
+    err.status = 403;
+    throw err;
+  }
+  if (user && user.status === 'rejected') {
+    const err = new Error('注册申请未通过审核');
+    err.status = 403;
+    throw err;
+  }
+  if (user && user.status === 'disabled') {
+    const err = new Error('账号已停用');
+    err.status = 403;
+    throw err;
+  }
+  const valid = user && user.status === 'active' && verifyPassword(password, user.password_hash);
   if (!valid) {
     const next = record && record.reset > now ? record : { count: 0, reset: now + LOGIN_WINDOW_MS };
     next.count += 1;
@@ -90,8 +105,8 @@ function isAdmin(user) {
   return user && user.role === 'admin';
 }
 
-function isManager(user) {
-  return user && (user.role === 'admin' || user.role === 'manager');
+function isLeader(user) {
+  return user && (user.role === 'admin' || user.role === 'leader');
 }
 
 module.exports = {
@@ -104,5 +119,6 @@ module.exports = {
   requireAuth,
   requireAdmin,
   isAdmin,
-  isManager,
+  isLeader,
+  isManager: isLeader,
 };
