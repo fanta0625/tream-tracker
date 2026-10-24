@@ -6,8 +6,8 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 const { once } = require('node:events');
-const { RateLimiter } = require('../rate-limit');
-const root = path.resolve(__dirname, '..');
+const { RateLimiter } = require('../../src/rate-limit');
+const root = path.resolve(__dirname, '../..');
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'team-tracker-tests-'));
 const env = { ...process.env, DATA_DIR: dataDir, HOST: '127.0.0.1', PORT: '0', COOKIE_SECURE: '0', SEED_DEMO: '0', TRUST_PROXY: '', TRUSTED_PROXIES: '', PUBLIC_ORIGIN: '' };
 
@@ -17,7 +17,7 @@ function initialize(overrides = {}) {
 
 async function serve(t, overrides = {}) {
   // SMTP is stubbed in the child; these tests never deliver real mail.
-  const boot = "const mail=require('./mailer'); mail.isConfigured=()=>true; mail.sendVerificationCode=async()=>{}; mail.sendPasswordResetCode=async()=>{}; mail.sendApproved=async()=>{}; require('./server');";
+  const boot = "const mail=require('./src/mailer'); mail.isConfigured=()=>true; mail.sendVerificationCode=async()=>{}; mail.sendPasswordResetCode=async()=>{}; mail.sendApproved=async()=>{}; require('./server');";
   const child = spawn(process.execPath, ['-e', boot], { cwd: root, env: { ...env, ...overrides }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = '';
   let errors = '';
@@ -55,9 +55,9 @@ test('security and application regression', async t => {
   assert.equal(initialize().stdout, '', 'restart must not print or reset credentials');
   process.env.DATA_DIR = dataDir;
   process.env.SEED_DEMO = '0';
-  const db = require('../db');
-  const security = require('../security');
-  const auth = require('../auth');
+  const db = require('../../src/db');
+  const security = require('../../src/security');
+  const auth = require('../../src/auth');
   const request = await serve(t);
   const password = 'Regression-password-2026';
   let adminCookie;
@@ -272,7 +272,7 @@ test('legacy migration preserves disabled accounts and restart never seeds demo 
 });
 
 test('upgrade rotates known admin credentials and disables known demo credentials once', () => {
-  const security = require('../security');
+  const security = require('../../src/security');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'team-tracker-credentials-'));
   assert.equal(initialize({ DATA_DIR: dir, SEED_DEMO: '1' }).status, 0);
   const database = new DatabaseSync(path.join(dir, 'tracker.db'));

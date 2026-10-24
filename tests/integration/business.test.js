@@ -9,7 +9,7 @@ process.env.DATA_DIR = path.join(dir, 'custom-data');
 process.env.BACKUP_DIR = path.join(dir, 'custom-backups');
 process.env.INITIAL_ADMIN_PASSWORD = 'Business-password-2026';
 process.env.SEED_DEMO = '0';
-const db = require('../db');
+const db = require('../../src/db');
 const admin = db.getUserByUsername('admin');
 
 test('业务数据一致性、版本、权限、草稿与恢复', async t => {
@@ -76,9 +76,9 @@ test('业务数据一致性、版本、权限、草稿与恢复', async t => {
     assert.equal(db.getDraft(alice, 'project-weekly'), null);
   });
   await t.test('自定义目录备份，完整性、密钥及恢复业务数据验证', () => {
-    const { encryptText } = require('../security');
+    const { encryptText } = require('../../src/security');
     db.setSetting('smtp_pass_enc', encryptText('smtp-backup-test'));
-    const { backup, restore, verify } = require('../scripts/backup');
+    const { backup, restore, verify } = require('../../scripts/backup');
     const snapshot = backup();
     assert(snapshot.startsWith(process.env.BACKUP_DIR));
     verify(snapshot);
@@ -86,7 +86,7 @@ test('业务数据一致性、版本、权限、草稿与恢复', async t => {
     restore(snapshot, restored);
     assert.throws(() => restore(snapshot, restored), /空目录/);
     assert.equal(fs.readFileSync(path.join(restored, 'session.secret'), 'utf8'), fs.readFileSync(path.join(process.env.DATA_DIR, 'session.secret'), 'utf8'));
-    const child = spawnSync(process.execPath, ['-e', "const d=require('./db'); console.log(JSON.stringify({items:d.listItems().length,reports:d.getReport(1,d.getUserByUsername('admin')).done,secret:require('./security').decryptText(d.getSetting('smtp_pass_enc'))}));"], { cwd: path.resolve(__dirname, '..'), env: { ...process.env, DATA_DIR: restored }, encoding: 'utf8' });
+    const child = spawnSync(process.execPath, ['-e', "const d=require('./src/db'); console.log(JSON.stringify({items:d.listItems().length,reports:d.getReport(1,d.getUserByUsername('admin')).done,secret:require('./src/security').decryptText(d.getSetting('smtp_pass_enc'))}));"], { cwd: path.resolve(__dirname, '../..'), env: { ...process.env, DATA_DIR: restored }, encoding: 'utf8' });
     assert.equal(child.status, 0, child.stderr);
     assert.equal(JSON.parse(child.stdout).reports, 'changed');
     assert.equal(JSON.parse(child.stdout).secret, 'smtp-backup-test');
@@ -95,13 +95,13 @@ test('业务数据一致性、版本、权限、草稿与恢复', async t => {
   });
   await t.test('本机管理员恢复撤销会话并强制改密', () => {
     const before = db.getUserById(admin.id);
-    const child = spawnSync(process.execPath, ['scripts/recover-admin.js', 'admin'], { cwd: path.resolve(__dirname, '..'), env: process.env, encoding: 'utf8' });
+    const child = spawnSync(process.execPath, ['scripts/recover-admin.js', 'admin'], { cwd: path.resolve(__dirname, '../..'), env: process.env, encoding: 'utf8' });
     assert.equal(child.status, 0, child.stderr);
     const password = child.stdout.match(/管理员临时密码：([^\r\n]+)/)[1];
     const after = db.getUserById(admin.id);
     assert.equal(after.must_change_password, 1);
     assert(after.session_version > before.session_version);
-    assert(require('../security').verifyPassword(password, after.password_hash));
+    assert(require('../../src/security').verifyPassword(password, after.password_hash));
     assert(db.listAudit().some(entry => entry.action === 'localAdminRecovery'));
   });
 });

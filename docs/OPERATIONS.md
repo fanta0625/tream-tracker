@@ -4,9 +4,9 @@
 
 1. 创建专用系统用户 `team-tracker`，把应用放到 `/opt/team-tracker`，数据目录放到 `/var/lib/team-tracker`，只授权服务用户访问。
 2. 运行 `npm ci`，参考下面配置创建 `/etc/team-tracker.env`（权限 0600），按实际域名与目录替换。
-3. 在可信交互终端导出同样的 `DATA_DIR`，运行 `node initialize.js`，保存临时密码。首次初始化不要通过 journal、CI 或重定向日志执行。
-4. 使用 `docs/nginx.conf.example` 配置域名证书和反向代理，仅对外开放 80/443，覆盖转发头。
-5. 安装 `docs/team-tracker.service` 到 systemd，执行 daemon-reload 后启动服务。服务模板直接运行已初始化的 `server.js`，不会把首次临时密码输出到 journal。
+3. 在可信交互终端导出同样的 `DATA_DIR`，运行 `npm run init`，保存临时密码。首次初始化不要通过 journal、CI 或重定向日志执行。
+4. 使用 `deploy/nginx.conf.example` 配置域名证书和反向代理，仅对外开放 80/443，覆盖转发头。
+5. 安装 `deploy/team-tracker.service` 到 systemd，执行 daemon-reload 后启动服务。服务模板直接运行已初始化的 `src/server.js`，不会把首次临时密码输出到 journal。
 6. 用真实 HTTPS 地址验证登录、首次改密、项目报告、导出与退出；配置 SMTP 后在管理页面发送测试邮件。
 
 ```ini
@@ -21,7 +21,7 @@ REQUEST_LOG=1
 
 环境文件由 systemd 加载；直接执行 npm 或 shell 脚本时需自行导出环境变量。`start.sh` 适用于简易部署；正式部署建议使用 systemd 自动重启和 SIGTERM 优雅退出。
 
-请求日志只包含请求 ID、方法、路径、状态码、耗时，不记录请求体、Cookie、验证码和密码。管理员可查询 `/api/admin/metrics`；`/api/health` 执行数据库查询。systemd 日志使用 journald 的容量/保留策略；使用 `start.sh` 时参考 `docs/logrotate.conf`。
+请求日志只包含请求 ID、方法、路径、状态码、耗时，不记录请求体、Cookie、验证码和密码。管理员可查询 `/api/admin/metrics`；`/api/health` 执行数据库查询。systemd 日志使用 journald 的容量/保留策略；使用 `start.sh` 时参考 `deploy/logrotate.conf`。
 
 ## 备份与异机副本
 

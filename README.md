@@ -2,6 +2,12 @@
 
 按项目写日报/周报，按日期查看全员工作、跟踪事项进度与更新履历、按区间汇总，并导出 Markdown/Excel。支持邮箱注册、管理员审核、多组管理、组长创建项目和报告可见性。单进程 + SQLite，无外部数据库、无前端构建步骤。
 
+## 工程目录与开发
+
+服务端源码位于 `src/`，浏览器资源位于 `public/`，工具脚本位于 `scripts/`，部署模板位于 `deploy/`。集成测试与浏览器测试分别放在 `tests/integration/`、`tests/browser/`。根目录旧启动命令仍可使用。
+
+详细目录职责、开发命令和修改约定见 [开发指南](docs/DEVELOPMENT.md)。完整本地检查执行 `npm run verify`（首次需安装 Playwright Chromium）。
+
 ## 启动与首次登录
 
 需要 Node.js 24 或更高版本，首次先运行 `npm ci`。
@@ -22,7 +28,7 @@ export PUBLIC_ORIGIN=https://tracker.example.com
 ./start.sh
 ```
 
-配置 HTTPS 反向代理，示例见 [docs/nginx.conf.example](docs/nginx.conf.example)。也可用 `npm start` 前台运行。
+配置 HTTPS 反向代理，示例见 [deploy/nginx.conf.example](deploy/nginx.conf.example)。也可用 `npm start` 前台运行。
 
 - 首次初始化只创建 `admin`；启动终端显示随机生成的 32 位临时密码，保存到数据库的只有密码哈希。
 - 临时密码仅显示一次，不写入 `logs/server.log`。首次初始化请在可信终端执行，不要重定向或录制终端输出；后续重启不修改密码。

@@ -3,15 +3,17 @@
   "version": "1.0.0",
   "private": true,
   "description": "轻量团队工作追踪：按日期看全员工作、事项进度、更新履历，导出 Markdown/Excel",
-  "main": "server.js",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node initialize.js && node server.js",
-    "dev": "node dev.js",
-    "test": "node --test tests/*.test.js",
+    "start": "node scripts/initialize.js && node src/server.js",
+    "dev": "node scripts/dev.js",
+    "test": "node --test tests/integration/*.test.js",
     "check": "node scripts/check.js",
     "test:e2e": "playwright test",
     "backup": "node scripts/backup.js",
-    "benchmark": "node scripts/benchmark.js"
+    "benchmark": "node scripts/benchmark.js",
+    "init": "node scripts/initialize.js",
+    "verify": "npm run check && npm test && npm run test:e2e"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

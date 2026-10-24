@@ -37,7 +37,7 @@ test('SMTP 协议联调仅连接本地接收器', async t => {
   process.env.SMTP_SECURE = 'none';
   process.env.SMTP_FROM = 'sender@example.invalid';
   delete process.env.SMTP_USER; delete process.env.SMTP_PASS;
-  await require('../mailer').sendVerificationCode('recipient@example.invalid', '654321');
+  await require('../../src/mailer').sendVerificationCode('recipient@example.invalid', '654321');
   assert.match(received, /recipient@example.invalid/);
   assert(received.length > 100);
 });

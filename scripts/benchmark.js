@@ -4,7 +4,7 @@ const path = require('node:path');
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tracker-benchmark-'));
 process.env.INITIAL_ADMIN_PASSWORD = 'Benchmark-password-2026';
 process.env.SEED_DEMO = '0';
-const db = require('../db');
+const db = require('../src/db');
 const { DatabaseSync } = require('node:sqlite');
 const raw = new DatabaseSync(db.DB_PATH);
 const member = db.createMember({ name: 'Benchmark' });
@@ -31,7 +31,7 @@ function measure(name, fn) {
   measure('daily_view', () => db.getDay(today, db.getUserByUsername('admin')));
   measure('summary', () => db.getSummary(today, today));
   const start = performance.now();
-  const { workbook } = await require('../services/exports').buildWorkbook({ from: today, to: today });
+  const { workbook } = await require('../src/services/exports').buildWorkbook({ from: today, to: today });
   const buffer = await workbook.xlsx.writeBuffer();
   results.xlsx = { duration_ms: +(performance.now() - start).toFixed(2), bytes: buffer.length };
   console.log(JSON.stringify({ node: process.version, items: count, updates: count, results, rss_mb: +(process.memoryUsage().rss / 1048576).toFixed(1) }, null, 2));

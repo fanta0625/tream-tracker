@@ -16,17 +16,17 @@
 
 | 模块 | 职责 |
 |---|---|
-| `config.js` | 应用、数据目录、备份目录和时区配置 |
-| `lib/migrations.js` | 编号、事务化、仅执行一次的数据库迁移 |
-| `db.js` | SQLite 连接、身份/分组、审计、初始化和服务组装 |
-| `services/projects.js` | 项目与报告访问规则、查询、状态变更和版本保护 |
-| `services/items.js` | 事项、历史更新、历史视图和汇总 |
-| `services/exports.js` | Markdown / Excel 格式化 |
-| `routes/` | 事项、项目报告及运维接口 |
-| `lib/validation.js` | HTTP 参数约束及分页 |
-| `lib/observability.js` | 请求标识、结构化日志、错误和限流计数 |
-| `public/projects.js`、`items.js`、`administration.js`、`groups.js` | 前端业务界面 |
-| `public/workflow.js` | 草稿恢复、地址导航、未保存保护和键盘焦点 |
+| `src/config.js` | 应用、数据目录、备份目录和时区配置 |
+| `src/lib/migrations.js` | 编号、事务化、仅执行一次的数据库迁移 |
+| `src/db.js` | SQLite 连接、身份/分组、审计、初始化和服务组装 |
+| `src/services/projects.js` | 项目与报告访问规则、查询、状态变更和版本保护 |
+| `src/services/items.js` | 事项、历史更新、历史视图和汇总 |
+| `src/services/exports.js` | Markdown / Excel 格式化 |
+| `src/routes/` | 事项、项目报告及运维接口 |
+| `src/lib/validation.js` | HTTP 参数约束及分页 |
+| `src/lib/observability.js` | 请求标识、结构化日志、错误和限流计数 |
+| `public/js/projects.js`、`items.js`、`administration.js`、`groups.js` | 前端业务界面 |
+| `public/js/workflow.js` | 草稿恢复、地址导航、未保存保护和键盘焦点 |
 
 前端保持无构建流程，分模块脚本共享 `app.js` 的 API、状态和渲染工具。拆分是渐进式的；未引入微服务、ORM 或新的前端框架。
 
