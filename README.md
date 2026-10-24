@@ -38,6 +38,33 @@ export PUBLIC_ORIGIN=https://tracker.example.com
 - 生产只对外开放 HTTPS 网关，禁止外部直连应用端口。代理必须覆盖转发头；`TRUSTED_PROXIES` 只填实际可信代理 IP/CIDR，不再支持 `TRUST_PROXY=1`。
 - `COOKIE_SECURE=0` 仅允许回环监听，供本地开发使用。应用不会自行签发 HTTPS 证书。
 
+## 忘记管理员密码
+
+已有数据库时，重新运行 `npm run dev` 不会再次生成或显示管理员密码。忘记密码可在服务器本机的可信终端重置，无需删除数据库。
+
+1. 先停止服务：开发模式在运行终端按 `Ctrl+C`；通过启动脚本运行的执行 `./stop.sh`；通过 systemd 运行的执行 `sudo systemctl stop team-tracker`。
+2. 在项目根目录执行（`admin` 可替换为实际管理员用户名）：
+
+   ```bash
+   node scripts/recover-admin.js admin
+   ```
+
+   如果服务使用自定义数据目录，重置时必须指定相同的 `DATA_DIR`。Linux 示例：
+
+   ```bash
+   DATA_DIR=/var/lib/team-tracker node scripts/recover-admin.js admin
+   ```
+
+3. 保存终端显示的随机临时密码，再按原方式启动服务。开发模式执行：
+
+   ```bash
+   npm run dev
+   ```
+
+4. 用临时密码登录，按提示设置新密码。
+
+该命令需要数据目录的读写权限，只能重置已有管理员账号；会恢复账号为启用状态、撤销旧会话并强制下次登录改密。请勿将临时密码输出重定向到日志。
+
 ## 账号与角色
 
 | 角色 | 权限 |
