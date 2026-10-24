@@ -147,7 +147,7 @@ function updateWorkUpdateImpl(id, body = {}, user) {
     throw err;
   }
   const status = body.status !== undefined ? validStatus(body.status, update.status) : update.status;
-  const progress = body.progress !== undefined ? clampProgress(body.progress, Number(update.progress)) : Number(update.progress);
+  const progress = status === 'done' ? 100 : (body.progress !== undefined ? clampProgress(body.progress, Number(update.progress)) : Number(update.progress));
   const note = body.note !== undefined ? String(body.note || '').trim() : update.note;
   run(`
     UPDATE updates SET update_date = ?, status = ?, progress = ?, note = ?,
@@ -274,7 +274,7 @@ function createItem(body = {}, actor = null) {
   }
 
   const status = validStatus(body.status, 'todo');
-  const progress = clampProgress(body.progress, 0);
+  const progress = status === 'done' ? 100 : clampProgress(body.progress, 0);
   const priority = validPriority(body.priority, 'medium');
   const startDate = isDate(body.start_date) ? body.start_date : todayStr();
   const dueDate = isDate(body.due_date) ? body.due_date : null;
@@ -381,7 +381,7 @@ function addUpdateImpl(itemId, body = {}, actor = null) {
 
   const updateDate = isDate(body.update_date) ? body.update_date : todayStr();
   const status = validStatus(body.status, item.status);
-  const progress = clampProgress(body.progress, Number(item.progress));
+  const progress = status === 'done' ? 100 : clampProgress(body.progress, Number(item.progress));
   const note = String(body.note || '').trim();
   const createdAt = nowIso();
 

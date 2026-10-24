@@ -75,6 +75,21 @@ test('业务数据一致性、版本、权限、草稿与恢复', async t => {
     db.deleteDraft(alice, 'project-weekly');
     assert.equal(db.getDraft(alice, 'project-weekly'), null);
   });
+  await t.test('完成事项的新建、更新及履历编辑统一保存 100% 进度', () => {
+    let item = db.createItem({ member_id: member.id, title: 'Completion', status: 'done', progress: 12 }, admin);
+    assert.equal(item.progress, 100);
+    assert.equal(item.timeline[0].progress, 100);
+    item = db.addUpdate(item.id, { status: 'doing', progress: 35 }, admin);
+    assert.equal(item.progress, 35);
+    item = db.addUpdate(item.id, { status: 'done' }, admin);
+    assert.equal(item.progress, 100);
+    const update = item.timeline[item.timeline.length - 1];
+    let edited = db.updateWorkUpdate(update.id, { status: 'doing', progress: 40, version: update.version }, admin);
+    assert.equal(edited.update.progress, 40);
+    edited = db.updateWorkUpdate(update.id, { status: 'done', progress: 5, version: edited.update.version }, admin);
+    assert.equal(edited.update.progress, 100);
+    assert.equal(db.getItemDetail(item.id, admin).progress, 100);
+  });
   await t.test('自定义目录备份，完整性、密钥及恢复业务数据验证', () => {
     const { encryptText } = require('../../src/security');
     db.setSetting('smtp_pass_enc', encryptText('smtp-backup-test'));

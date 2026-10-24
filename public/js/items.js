@@ -1,3 +1,15 @@
+function bindCompletionProgress(form) {
+  const status = form.elements.namedItem('status');
+  const progress = form.elements.namedItem('progress');
+  const sync = () => {
+    const completed = status.value === 'done';
+    if (completed) progress.value = '100';
+    progress.readOnly = completed;
+  };
+  status.addEventListener('change', sync);
+  sync();
+}
+
 function timelineHtml(item) {
   if (!item.timeline.length) return '<div class="empty-state">暂无更新记录。</div>';
   return [...item.timeline].reverse().map((u) => {
@@ -66,6 +78,7 @@ async function openUpdateForm(updateId) {
         </form>
       </div>`);
 
+    bindCompletionProgress($('#updateEditForm'));
     $('#updateEditForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -208,6 +221,7 @@ async function openItem(id) {
 
     const updateForm = $('#updateForm');
     if (updateForm) {
+      bindCompletionProgress(updateForm);
       updateForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         const form = event.currentTarget;
@@ -399,6 +413,7 @@ function openNewItem() {
 
   openModal(html);
 
+  bindCompletionProgress($('#newItemForm'));
   $('#newItemForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
