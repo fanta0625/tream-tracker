@@ -853,3 +853,8 @@ body.modal-open { overflow: hidden; }
   .top-actions .btn { flex: 0 0 auto; }
   .user-area { width: auto; }
 }
+
+@media (max-width: 480px) {
+  .report-toolbar { flex-wrap: wrap; }
+  .report-toolbar .date-input { min-width: 130px; flex: 1 0 130px; }
+}

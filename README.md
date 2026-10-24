@@ -37,7 +37,7 @@ export PUBLIC_ORIGIN=https://tracker.example.com
 | 角色 | 权限 |
 |---|---|
 | 管理员 `admin` | 全部数据、用户/成员/分组管理、邮件设置、注册审核、项目/报告管理、角色分配、重置密码 |
-| 组长 `leader` | 查看全部、创建/更新/归档任意事项；在自己带的组创建/管理项目、查看本组报告；不能管理用户/分组 |
+| 组长 `leader` | 管理自己负责组的项目关联事项；在自己带的组创建/管理项目、查看本组报告；不能管理用户/分组 |
 | 组员 `member` | 查看本组项目、写日报/周报；查看同组/公开报告；只能创建和更新自己的事项/报告 |
 
 默认不创建演示数据。仅在全新数据库首次初始化时，显式设置 `SEED_DEMO=1` 才会创建演示成员和事项。演示账号默认停用、密码随机，不再有公开固定密码；需要使用时由管理员重置密码并启用。
@@ -80,7 +80,7 @@ export PUBLIC_ORIGIN=https://tracker.example.com
 - **更新记录编辑/删除**：日报展板和事项履历里的每条更新都可以编辑或删除；删除需要输入「确认删除」。
 - **汇总视图**：任意日期区间，按成员统计更新条数、涉及事项、状态分布；支持最近 7 天/30 天/本月。
 - **导出**：Markdown 日报/区间汇总；Excel（工作更新、事项总览、成员三个 Sheet）。
-- **权限**：成员只能改自己的事项，组长/管理员可改全部；服务端强制校验。
+- **权限**：成员只能改自己的事项，组长管理负责组的项目关联事项，管理员可改全部；服务端强制校验。
 - **用户管理**：管理员创建账号、关联成员、调整角色、重置密码、启用/停用；审核邮箱注册。
 - **忘记密码**：登录页通过邮箱验证码重置密码。
 - **邮件设置**：管理员配置 SMTP，支持 QQ/163/Gmail/企业邮箱，密码加密保存，可发送测试邮件。
@@ -96,7 +96,7 @@ export PUBLIC_ORIGIN=https://tracker.example.com
 cd /path/to/team-tracker
 ./start.sh
 ./stop.sh
-./backup.sh          # 备份到 backups/，保留 14 天
+./backup.sh          # 成套备份到 backups/snapshot-*/，保留 14 天
 tail -f logs/server.log
 ```
 
@@ -145,9 +145,8 @@ npm audit --omit=dev
 
 - SQLite：`data/tracker.db`（WAL 模式）
 - 会话密钥：`data/session.secret`（0600）
-- 备份：`backups/tracker-YYYYmmdd-HHMMSS.db` + `backups/session-secret-YYYYmmdd-HHMMSS`，保留 14 天
-  - 备份包含 `session.secret`，因为 SMTP 密码加密依赖它；恢复时两者要一起恢复。
-- 重置：停止服务，删除 `data/tracker.db*` 和 `data/session.secret`，按上面的初始化命令启动
+- 备份：`backups/snapshot-*/`，包含数据库、会话密钥和 SHA-256 清单，默认保留 14 天。支持 `DATA_DIR`、`BACKUP_DIR` 和 `BACKUP_MIRROR_DIR`。恢复必须使用完整快照。
+- 管理员恢复：停止服务，在可信本机终端运行 `node scripts/recover-admin.js admin`；不要删除数据库。
 
 ## 技术栈
 
@@ -161,3 +160,20 @@ npm audit --omit=dev
 ## API 文档
 
 接口清单见 [docs/API.md](docs/API.md)。
+
+## 稳定化与重构
+
+本轮加入：周报正确提交、归档只读及恢复、历史状态重建、批量操作事务、事项与项目关联、编辑版本冲突检测、管理员审计、账号隔离的报告草稿、列表分页、浏览器回归、CI、编号迁移、备份校验恢复、进程托管模板和性能基准。
+
+- [业务规则、权限矩阵与模块边界](docs/RECONSTRUCTION.md)
+- [部署、日志、备份恢复与管理员恢复](docs/OPERATIONS.md)
+
+```bash
+npm run check
+npm test
+npx playwright install chromium
+npm run test:e2e
+npm run benchmark
+```
+
+编辑项目、报告、事项与更新记录的 PATCH 需要携带 `version`；缺失返回 428，版本冲突返回 409。事项和报告列表默认分页；客户端应使用 `page`、`limit` 和响应的 `has_more`。

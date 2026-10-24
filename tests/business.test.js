@@ -1,0 +1,107 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tracker-business-'));
+process.env.DATA_DIR = path.join(dir, 'custom-data');
+process.env.BACKUP_DIR = path.join(dir, 'custom-backups');
+process.env.INITIAL_ADMIN_PASSWORD = 'Business-password-2026';
+process.env.SEED_DEMO = '0';
+const db = require('../db');
+const admin = db.getUserByUsername('admin');
+
+test('业务数据一致性、版本、权限、草稿与恢复', async t => {
+  const member = db.createMember({ name: 'Member' });
+  const alice = await db.createUser({ username: 'alice', password: 'Business-password-2026', member_id: member.id });
+  const disabled = await db.createUser({ username: 'disabled', password: 'Business-password-2026', status: 'disabled' });
+  const group = db.createGroup({ name: 'Group', leader_user_id: alice.id });
+  const project = db.createProject({ group_id: group.id, name: 'Project' }, admin);
+  let report;
+  await t.test('批量失败完全回滚', () => {
+    const target = db.createGroup({ name: 'Target' });
+    assert.throws(() => db.addGroupMembers(target.id, [alice.id, disabled.id]), error => error.status === 400);
+    assert.equal(db.isGroupMember(alice.id, target.id), false);
+  });
+  await t.test('周起始日、归档只读、恢复、可见统计', () => {
+    report = db.createReport(project.id, { type: 'weekly', report_date: '2026-10-22', visibility: 'private', done: 'weekly' }, admin);
+    assert.equal(report.report_date, '2026-10-19');
+    assert.equal(db.getProject(project.id, alice).report_count, 0);
+    db.archiveProject(project.id, admin);
+    assert.equal(db.listProjects(admin, { status: 'archived' }).length, 1);
+    assert.throws(() => db.createReport(project.id, { report_date: '2026-10-24' }, alice), error => error.status === 409);
+    assert.throws(() => db.updateReport(report.id, { done: 'no' }, admin), error => error.status === 409);
+    assert.throws(() => db.deleteReport(report.id, admin), error => error.status === 409);
+    db.updateProject(project.id, { status: 'active' }, admin);
+  });
+  await t.test('乐观锁拒绝旧版本，审计保存修改前后且无密码', async () => {
+    const saved = db.updateReport(report.id, { done: 'changed', version: report.version }, admin);
+    assert.equal(saved.version, report.version + 1);
+    assert.throws(() => db.updateReport(report.id, { done: 'lost update', version: report.version }, admin), error => error.status === 409);
+    const entry = db.listAudit().find(entry => entry.action === 'updateReport');
+    assert.equal(JSON.parse(entry.before_json).done, 'weekly');
+    assert.equal(JSON.parse(entry.after_json).done, 'changed');
+    await db.updateUser(alice.id, { password: 'Changed-password-2026' });
+    assert(!JSON.stringify(db.listAudit()).includes('scrypt$'));
+  });
+  await t.test('历史日报使用当日最新状态且排除未来事项', () => {
+    const item = db.createItem({ member_id: member.id, title: 'Past', start_date: '2026-10-01', update_date: '2026-10-01', status: 'doing', progress: 10 }, admin);
+    db.addUpdate(item.id, { update_date: '2026-10-20', status: 'done', progress: 100 }, admin);
+    db.createItem({ member_id: member.id, title: 'Future', update_date: '2026-10-21', start_date: '2026-10-21' }, admin);
+    const card = db.getDay('2026-10-10').members.find(row => row.id === member.id);
+    assert.equal(card.silentItems.length, 1);
+    assert.equal(card.silentItems[0].status, 'doing');
+    assert.equal(card.silentItems[0].progress, 10);
+  });
+  await t.test('关联事项权限按负责组限制，保留原始项目名称', async () => {
+    const other = db.createGroup({ name: 'Other' });
+    const otherProject = db.createProject({ group_id: other.id, name: 'Other project' }, admin);
+    const leader = db.getUserById(alice.id);
+    const own = db.createItem({ member_id: member.id, title: 'Linked', project_id: project.id, project: '旧名称' }, admin);
+    const outside = db.createItem({ member_id: member.id, title: 'Outside', project_id: otherProject.id }, admin);
+    assert.equal(own.project, '旧名称');
+    assert.equal(db.canEditItem(leader, own), true);
+    assert.equal(db.canEditItem(leader, outside), false);
+  });
+  await t.test('分页不会重复；草稿按账号隔离', () => {
+    const first = db.listItems({ limit: 2, offset: 0 });
+    const second = db.listItems({ limit: 2, offset: 2 });
+    assert.equal(first.length, 2);
+    assert(!second.some(row => first.some(previous => previous.id === row.id)));
+    db.saveDraft(alice, 'project-weekly', { done: 'Private draft' });
+    assert.equal(db.getDraft(admin, 'project-weekly'), null);
+    assert.equal(db.getDraft(alice, 'project-weekly').done, 'Private draft');
+    db.deleteDraft(alice, 'project-weekly');
+    assert.equal(db.getDraft(alice, 'project-weekly'), null);
+  });
+  await t.test('自定义目录备份，完整性、密钥及恢复业务数据验证', () => {
+    const { encryptText } = require('../security');
+    db.setSetting('smtp_pass_enc', encryptText('smtp-backup-test'));
+    const { backup, restore, verify } = require('../scripts/backup');
+    const snapshot = backup();
+    assert(snapshot.startsWith(process.env.BACKUP_DIR));
+    verify(snapshot);
+    const restored = path.join(dir, 'restored');
+    restore(snapshot, restored);
+    assert.throws(() => restore(snapshot, restored), /空目录/);
+    assert.equal(fs.readFileSync(path.join(restored, 'session.secret'), 'utf8'), fs.readFileSync(path.join(process.env.DATA_DIR, 'session.secret'), 'utf8'));
+    const child = spawnSync(process.execPath, ['-e', "const d=require('./db'); console.log(JSON.stringify({items:d.listItems().length,reports:d.getReport(1,d.getUserByUsername('admin')).done,secret:require('./security').decryptText(d.getSetting('smtp_pass_enc'))}));"], { cwd: path.resolve(__dirname, '..'), env: { ...process.env, DATA_DIR: restored }, encoding: 'utf8' });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(JSON.parse(child.stdout).reports, 'changed');
+    assert.equal(JSON.parse(child.stdout).secret, 'smtp-backup-test');
+    fs.appendFileSync(path.join(snapshot, 'session.secret'), 'corrupted');
+    assert.throws(() => verify(snapshot), /校验失败/);
+  });
+  await t.test('本机管理员恢复撤销会话并强制改密', () => {
+    const before = db.getUserById(admin.id);
+    const child = spawnSync(process.execPath, ['scripts/recover-admin.js', 'admin'], { cwd: path.resolve(__dirname, '..'), env: process.env, encoding: 'utf8' });
+    assert.equal(child.status, 0, child.stderr);
+    const password = child.stdout.match(/管理员临时密码：([^\r\n]+)/)[1];
+    const after = db.getUserById(admin.id);
+    assert.equal(after.must_change_password, 1);
+    assert(after.session_version > before.session_version);
+    assert(require('../security').verifyPassword(password, after.password_hash));
+    assert(db.listAudit().some(entry => entry.action === 'localAdminRecovery'));
+  });
+});

@@ -81,6 +81,18 @@
 ## 权限说明
 
 - 管理员：全部数据、用户/分组/邮件/审核、全部项目与报告。
-- 组长：全量事项编辑；在自己负责的组创建/管理项目；查看本组报告（不含组员的「仅自己」报告）。
+- 组长：负责组内关联事项编辑；在自己负责的组创建/管理项目；查看本组报告（不含组员的「仅自己」报告）。
 - 组员：查看本组项目，写自己的日报/周报；只能修改自己的事项/报告。
 - 报告可见性：`private` 仅作者+管理员；`group` 同组可见；`public` 所有登录用户可见。
+
+## 分页、冲突与运维
+
+- `GET /api/items` 和 `GET /api/projects/:id/reports`：`page` 从 1 开始，`limit` 默认 50、最大 100；响应增加 `page`、`has_more`，原 `items`/`reports` 字段保留。
+- `GET /api/projects?status=archived`：归档列表；恢复使用 PATCH `{status: "active", version: 当前版本}`。
+- 项目、报告、事项元数据和更新记录 PATCH 必须传 `version`，缺失 428、冲突 409；归档项目拒绝报告新增/修改/删除。
+- 事项新增/编辑接受可空 `project_id`，`project` 文本保持兼容。
+- `GET /api/admin/audit?before=&limit=50`：管理员按审计 ID 倒序读取，最多 100 条。
+- `GET /api/admin/metrics`：管理员读取请求、错误、限流、运行时间和内存统计。
+- `GET/PUT/DELETE /api/drafts/:key`：当前用户报告草稿，用户间隔离，最多 100 份，保留 30 天。
+- 导出最多 10,000 条报告/更新，超过返回 413；同时最多两个导出请求，超出返回 429。
+- 响应 `X-Request-ID` 用于关联日志；`REQUEST_LOG=1` 开启结构化请求日志。

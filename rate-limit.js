@@ -35,6 +35,12 @@ class RateLimiter {
     }
     entry.count += 1;
   }
+
+  refund(key) {
+    const id = crypto.createHash('sha256').update(key).digest('hex');
+    const entry = this.entries.get(id);
+    if (entry && entry.expires > this.now()) entry.count = Math.max(0, entry.count - 1);
+  }
 }
 
 module.exports = { RateLimiter };

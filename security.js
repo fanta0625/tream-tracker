@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const { dataDir: DATA_DIR } = require('./config');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const SECRET_PATH = path.join(DATA_DIR, 'session.secret');

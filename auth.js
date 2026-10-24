@@ -58,6 +58,8 @@ async function login(username, password, ip) {
     throw err;
   }
   db.touchLogin(user.id);
+  loginAttempts.refund(`account:${user.id}`);
+  loginAttempts.refund(`ip:${ip}`);
   return current;
 }
 

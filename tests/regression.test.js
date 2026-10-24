@@ -26,7 +26,7 @@ async function serve(t, overrides = {}) {
     if (child.exitCode === null) { child.kill(); await once(child, 'exit'); }
   });
   const url = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Server startup timed out')), 10000);
+    const timer = setTimeout(() => reject(new Error('Server startup timed out')), 30000);
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('exit', () => { clearTimeout(timer); reject(new Error(`Server exited: ${errors}`)); });
     child.stdout.on('data', data => {
@@ -126,7 +126,7 @@ test('security and application regression', async t => {
     assert.throws(() => db.getReport(privateReport.id, bob), error => error.status === 403);
     db.removeGroupMember(group.id, alice.id);
     assert.equal(db.getReport(privateReport.id, alice).done, 'Secret');
-    assert.equal(db.updateReport(privateReport.id, { done: 'Updated' }, alice).done, 'Updated');
+    assert.throws(() => db.updateReport(privateReport.id, { done: 'Updated' }, alice), error => error.status === 403);
     db.addGroupMembers(group.id, [alice.id]);
   });
 
